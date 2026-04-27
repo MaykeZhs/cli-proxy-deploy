@@ -1,0 +1,30 @@
+# =============================================================================
+#  CLIProxyAPI Docker Compose - Antigravity Reverse Proxy
+# =============================================================================
+
+services:
+  cliproxyapi:
+    image: eceasy/cli-proxy-api:latest
+    container_name: antigravity-proxy
+    restart: unless-stopped
+    ports:
+      - "${CPA_PORT:-8317}:8317"
+    volumes:
+      - type: bind
+        source: ./config.yaml
+        target: /CLIProxyAPI/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - cpa-auth:/root/.cli-proxy-api
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cpa-auth:
+    name: antigravity-proxy-auth

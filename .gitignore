@@ -1,0 +1,18 @@
+# Config with secrets
+config.yaml
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Auth credentials
+auth/
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,48 @@
+# =============================================================================
+# CLIProxyAPI 示例配置 - Antigravity 反代
+# 复制此文件为 config.yaml 并根据需要修改
+# =============================================================================
+
+# 绑定地址（Docker 中需要 "" 以绑定所有接口，本地使用 "127.0.0.1"）
+host: ""
+
+# 服务端口
+port: 8317
+
+# 凭证目录（Docker 容器内路径）
+auth-dir: "/root/.cli-proxy-api"
+
+# API 密钥 —— 客户端连接时的认证令牌，请修改为你自己的密钥
+api-keys:
+  - "your-api-key-here"
+
+# 调试日志（部署稳定后建议关闭）
+debug: false
+
+# 重试配置
+request-retry: 3
+max-retry-interval: 30
+
+# 配额耗尽时的行为
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+  antigravity-credits: true
+
+# 路由策略: round-robin（轮询）或 fill-first（优先填满）
+routing:
+  strategy: "round-robin"
+
+# 流式响应保活
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 1
+
+# 非流式响应保活（秒），防止超时断连
+nonstream-keepalive-interval: 30
+
+# 管理面板
+remote-management:
+  allow-remote: false
+  secret-key: ""                # 留空则禁用管理 API，填写则启用
+  disable-control-panel: false
