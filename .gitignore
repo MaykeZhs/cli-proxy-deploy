@@ -16,3 +16,4 @@ auth/
 # IDE
 .vscode/
 .idea/
+.claude/

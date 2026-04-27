@@ -2,6 +2,8 @@
 #  CLIProxyAPI Docker Compose - Antigravity Reverse Proxy
 # =============================================================================
 
+name: antigravity-proxy
+
 services:
   cliproxyapi:
     image: eceasy/cli-proxy-api:latest

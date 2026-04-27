@@ -24,6 +24,8 @@ set -euo pipefail
 readonly VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DOCKER_IMAGE="eceasy/cli-proxy-api:latest"
+readonly COMPOSE_PROJECT_NAME="antigravity-proxy"
+export COMPOSE_PROJECT_NAME
 readonly CONTAINER_NAME="antigravity-proxy"
 readonly AUTH_VOLUME="antigravity-proxy-auth"
 readonly OAUTH_PORT=51121
@@ -373,6 +375,10 @@ start_service() {
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
         detail "停止旧容器..."
         CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" down 2>/dev/null || true
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+            detail "清理旧项目遗留容器..."
+            docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+        fi
     fi
 
     # 启动
@@ -595,7 +601,7 @@ cmd_status() {
         echo -n "     已登录凭证: "
         local cred_info
         cred_info=$(docker run --rm -v "${AUTH_VOLUME}:/auth" alpine \
-            sh -c "ls /auth/ 2>/dev/null | grep -v config | tr '\n' ' '" 2>/dev/null || echo "无")
+            sh -c "ls /auth/ 2>/dev/null | grep -Ev '^(config|logs)$' | tr '\\n' ' '" 2>/dev/null || echo "无")
         echo -e "${DIM}${cred_info:-无}${NC}"
     else
         warn "服务未运行"

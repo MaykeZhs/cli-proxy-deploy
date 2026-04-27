@@ -218,6 +218,27 @@ antigravity-proxy/
 ## 🧯 常见问题 / Troubleshooting
 
 <details>
+<summary><b>container name "/antigravity-proxy" is already in use</b></summary>
+
+这通常发生在你重命名项目目录、复制项目目录，或从另一个 Compose project 启动过同一个容器名之后。`docker ps` 只显示运行中的容器，所以冲突容器可能是 stopped 状态。
+
+This usually happens after renaming/copying the project folder or starting the same container from a different Compose project. `docker ps` only shows running containers, so the conflicting container may be stopped.
+
+```bash
+docker ps -a --filter name=antigravity-proxy
+docker rm antigravity-proxy
+docker compose up -d
+```
+
+如果你想保留 OAuth 登录状态，不要删除 `antigravity-proxy-auth` volume。
+
+Do not remove the `antigravity-proxy-auth` volume if you want to keep OAuth credentials.
+
+If Docker shows a warning that this volume was created for another project name, it is usually safe to keep using it. The warning means Compose is reusing the existing credential volume.
+
+</details>
+
+<details>
 <summary><b>config.yaml: is a directory</b></summary>
 
 这通常是因为在 `config.yaml` 文件存在前直接运行了 `docker compose up`，Docker 自动创建了同名目录。
