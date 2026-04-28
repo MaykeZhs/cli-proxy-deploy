@@ -4,13 +4,13 @@
 #  远程一键安装脚本
 #
 #  Usage / 用法:
-#    curl -fsSL https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.sh | bash
-#    REPO_URL=https://github.com/YOUR_USER/antigravity-proxy bash install.sh
+#    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
+#    REPO_URL=https://github.com/MaykeZhs/antigravity-proxy bash install.sh
 # =============================================================================
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/YOUR_USER/antigravity-proxy}"
+REPO_URL="${REPO_URL:-https://github.com/MaykeZhs/antigravity-proxy}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.antigravity-proxy}"
 BRANCH="${BRANCH:-main}"
 

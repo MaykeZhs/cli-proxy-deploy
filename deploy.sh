@@ -17,6 +17,10 @@
 #
 # =============================================================================
 
+if [ -z "${BASH_VERSION:-}" ] || [[ ":${SHELLOPTS:-}:" == *":posix:"* ]]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 # ========================== 常量 & 默认值 ====================================
@@ -302,13 +306,14 @@ do_login() {
     local provider="${1:-antigravity}"
     local login_flag
     local auth_pattern
+    local oauth_port="${OAUTH_PORT}"
     step "OAuth 登录 — ${provider}"
 
     case "${provider}" in
         antigravity) login_flag="-antigravity-login"; auth_pattern="antigravity*" ;;
         claude)      login_flag="-claude-login"; auth_pattern="claude*" ;;
         gemini)      login_flag="-login"; auth_pattern="*.json" ;;
-        codex)       login_flag="-codex-login"; auth_pattern="codex*" ;;
+        codex)       login_flag="-codex-login"; auth_pattern="codex*"; oauth_port=1455 ;;
         *)
             error "不支持的 Provider: ${provider}"
             exit 1
@@ -331,6 +336,7 @@ do_login() {
 
     echo ""
     echo -e "     ${YELLOW}即将生成 OAuth 登录链接${NC}"
+    echo -e "     ${YELLOW}本次 OAuth 回调端口: ${oauth_port}${NC}"
     echo -e "     ${YELLOW}请复制终端中的链接到浏览器完成授权，然后回到终端${NC}"
     echo ""
 
@@ -340,14 +346,14 @@ do_login() {
     fi
 
     if ! docker run --rm -it \
-        -p "${OAUTH_PORT}:${OAUTH_PORT}" \
+        -p "${oauth_port}:${oauth_port}" \
         -v "${CONFIG_FILE}:/CLIProxyAPI/config.yaml:ro" \
         -v "${AUTH_VOLUME}:/root/.cli-proxy-api" \
         "${DOCKER_IMAGE}" \
         ./CLIProxyAPI \
         -config /CLIProxyAPI/config.yaml \
         "${login_flag}" \
-        -oauth-callback-port "${OAUTH_PORT}" \
+        -oauth-callback-port "${oauth_port}" \
         -no-browser; then
         warn "登录命令未完成（可稍后重试: ${CYAN}bash deploy.sh login${NC}）"
         return 1
@@ -698,7 +704,7 @@ show_help() {
     echo -e "    CPA_PORT=9000 bash deploy.sh start"
     echo ""
     echo -e "    ${DIM}# 远程一键安装${NC}"
-    echo -e "    curl -fsSL https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.sh | bash"
+    echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash"
     echo ""
 }
 

@@ -62,7 +62,7 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-pr
 **Linux / macOS:**
 
 ```bash
-git clone https://github.com/YOUR_USER/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/antigravity-proxy.git
 cd antigravity-proxy
 bash deploy.sh
 ```
@@ -70,7 +70,7 @@ bash deploy.sh
 **Windows (PowerShell):**
 
 ```powershell
-git clone https://github.com/YOUR_USER/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/antigravity-proxy.git
 cd antigravity-proxy
 .\deploy.ps1
 ```
@@ -92,13 +92,13 @@ cd antigravity-proxy
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
 ### Option 2: Manual Install
@@ -106,7 +106,7 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/YOUR_USER/antigravity-p
 **Linux / macOS:**
 
 ```bash
-git clone https://github.com/YOUR_USER/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/antigravity-proxy.git
 cd antigravity-proxy
 bash deploy.sh
 ```
@@ -114,7 +114,7 @@ bash deploy.sh
 **Windows (PowerShell):**
 
 ```powershell
-git clone https://github.com/YOUR_USER/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/antigravity-proxy.git
 cd antigravity-proxy
 .\deploy.ps1
 ```
@@ -171,7 +171,9 @@ docker compose -f docker-compose.yml ps
 docker compose -f docker-compose.yml exec -T cliproxyapi sh -lc "test -f /CLIProxyAPI/config.yaml && ls -l /CLIProxyAPI/config.yaml"
 
 # API model list
-c
+$apiKey = (Select-String -Path config.yaml -Pattern '- "sk-([^"]+)"').Matches.Groups[1].Value
+Invoke-WebRequest -Uri "http://127.0.0.1:8317/v1/models" `
+  -Headers @{ Authorization = "Bearer $apiKey" }
 ```
 
 成功时 `/v1/models` 会返回真实模型列表，而不是空数组：
@@ -331,7 +333,7 @@ After deployment, add to your VS Code `settings.json`:
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317",
     "ANTHROPIC_AUTH_TOKEN": "your-api-key",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-6-thinking"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-7"
   }
 }
 ```
@@ -344,7 +346,7 @@ After deployment, add to your VS Code `settings.json`:
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8317"
 export ANTHROPIC_AUTH_TOKEN="your-api-key"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-6-thinking"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-7"
 ```
 
 **Windows (PowerShell profile):**
@@ -353,7 +355,7 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-6-thinking"
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8317"
 $env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
 $env:ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6-thinking"
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-7"
 ```
 
 ### 指定模型 / Specify Models (Claude Code v2.x.x)
@@ -365,7 +367,7 @@ First check available models with `/v1/models`, then use the exact returned `id`
 ```bash
 # Claude-compatible models via Antigravity
 export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-6-thinking"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-7"
 
 # Gemini models can also be used if your client supports the selected model id
 export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
@@ -428,6 +430,23 @@ antigravity-proxy/
 ---
 
 ## 🧯 常见问题 / Troubleshooting
+
+<details>
+<summary><b>Codex OAuth authentication fails</b></summary>
+
+Codex uses a different local OAuth callback port from Antigravity. CLIProxyAPI's Codex OAuth flow uses port `1455`, so this project maps `1455:1455` only for Codex login.
+
+If the terminal asks you to paste the callback URL, paste the callback URL from the same login attempt. The `state=...` value must match the auth URL printed by that current run. Do not reuse a callback URL from a previous attempt.
+
+Use Bash to run the script:
+
+```bash
+bash deploy.sh login
+```
+
+Do not paste OAuth callback URLs into public issues or screenshots because the `code=...` value is sensitive.
+
+</details>
 
 <details>
 <summary><b>container name "/antigravity-proxy" is already in use</b></summary>
@@ -614,7 +633,7 @@ See [SECURITY.md](SECURITY.md) for the full checklist.
 
 ## 🚢 发布前检查 / Publish Checklist
 
-- Replace `YOUR_USER` in `README.md`, `install.sh`, `install.ps1`, and `deploy.sh`/`deploy.ps1`.
+- Confirm repository URLs in `README.md`, `install.sh`, `install.ps1`, and deploy script help output.
 - Confirm `config.yaml` is not committed.
 - Run `bash -n deploy.sh` and `bash -n install.sh`.
 - Run `pwsh -NoProfile -Command "try { . .\deploy.ps1 } catch {}"` (syntax check).

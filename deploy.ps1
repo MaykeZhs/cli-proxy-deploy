@@ -382,6 +382,7 @@ function pull-image {
 function do-login($provider = 'antigravity') {
     $loginFlag = ''
     $authPattern = ''
+    $oauthPort = $script:OAUTH_PORT
 
     step "OAuth 登录 — $provider"
 
@@ -389,7 +390,7 @@ function do-login($provider = 'antigravity') {
         'antigravity' { $loginFlag = '-antigravity-login'; $authPattern = 'antigravity*' }
         'claude'      { $loginFlag = '-claude-login';      $authPattern = 'claude*' }
         'gemini'      { $loginFlag = '-login';             $authPattern = '*.json' }
-        'codex'       { $loginFlag = '-codex-login';       $authPattern = 'codex*' }
+        'codex'       { $loginFlag = '-codex-login';       $authPattern = 'codex*'; $oauthPort = 1455 }
         default       { error-msg "不支持的 Provider: $provider"; exit 1 }
     }
 
@@ -410,6 +411,7 @@ function do-login($provider = 'antigravity') {
 
     Write-Host ''
     Write-Host '     即将生成 OAuth 登录链接' -ForegroundColor Yellow
+    Write-Host "     本次 OAuth 回调端口: $oauthPort" -ForegroundColor Yellow
     Write-Host '     请复制终端中的链接到浏览器完成授权，然后回到终端' -ForegroundColor Yellow
     Write-Host ''
 
@@ -421,14 +423,14 @@ function do-login($provider = 'antigravity') {
     $loginOk = $false
     try {
         docker run --rm -it `
-            -p "$($script:OAUTH_PORT):$($script:OAUTH_PORT)" `
+            -p "${oauthPort}:${oauthPort}" `
             -v "$($script:CONFIG_FILE):/CLIProxyAPI/config.yaml:ro" `
             -v "$($script:AUTH_VOLUME):/root/.cli-proxy-api" `
             $script:DOCKER_IMAGE `
             ./CLIProxyAPI `
             -config /CLIProxyAPI/config.yaml `
             $loginFlag `
-            "-oauth-callback-port" "$($script:OAUTH_PORT)" `
+            "-oauth-callback-port" "$oauthPort" `
             -no-browser
         if ($LASTEXITCODE -eq 0) { $loginOk = $true }
     } catch { }

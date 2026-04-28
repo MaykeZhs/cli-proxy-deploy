@@ -4,13 +4,13 @@
 #  远程一键安装脚本 (Windows)
 #
 #  Usage / 用法:
-#    Invoke-WebRequest -Uri https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.ps1 | Invoke-Expression
-#    $env:REPO_URL='https://github.com/YOUR_USER/antigravity-proxy'; .\install.ps1
+#    Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 | Invoke-Expression
+#    $env:REPO_URL='https://github.com/MaykeZhs/antigravity-proxy'; .\install.ps1
 # =============================================================================
 
 $ErrorActionPreference = 'Stop'
 
-$REPO_URL    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/YOUR_USER/antigravity-proxy' }
+$REPO_URL    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/MaykeZhs/antigravity-proxy' }
 $INSTALL_DIR = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:USERPROFILE '.antigravity-proxy' }
 $BRANCH      = if ($env:BRANCH)      { $env:BRANCH }      else { 'main' }
 
