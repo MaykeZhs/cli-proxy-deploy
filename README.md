@@ -26,27 +26,53 @@
 | 🎯 Claude Code for VS Code 适配 / VS Code ready | 开箱即用的环境变量配置 / Ready-to-use env config |
 | 📊 管理面板 / Management panel | 内置 Web UI 监控 / Built-in Web UI monitoring |
 | 🔁 完整生命周期管理 / Full lifecycle | start / stop / restart / update / uninstall |
+| 🪟 Windows 原生支持 / Windows native | PowerShell 部署脚本 / PowerShell deploy scripts |
+
+---
+
+## 📋 前置要求 / Prerequisites
+
+| 平台 / Platform | 要求 / Requirements |
+|---|---|
+| **All** | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+| **Linux / macOS** | Bash (built-in) |
+| **Windows** | [PowerShell 7+](https://learn.microsoft.com/powershell/scripting/install/installing-powershell) (`pwsh`) |
 
 ---
 
 ## 🚀 快速开始
 
-> 发布到你自己的 GitHub 前，请把下面命令中的 `YOUR_USER` 替换为你的 GitHub 用户名或组织名。
->
-> Before publishing, replace `YOUR_USER` with your GitHub username or organization.
 
 ### 方式一：远程一键安装
 
+**Linux / macOS:**
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
 ### 方式二：手动安装
+
+**Linux / macOS:**
 
 ```bash
 git clone https://github.com/YOUR_USER/antigravity-proxy.git
 cd antigravity-proxy
 bash deploy.sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/YOUR_USER/antigravity-proxy.git
+cd antigravity-proxy
+.\deploy.ps1
 ```
 
 部署脚本会引导你完成：
@@ -63,16 +89,34 @@ bash deploy.sh
 
 ### Option 1: Remote One-Click Install
 
+**Linux / macOS:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.sh | bash
 ```
 
+**Windows (PowerShell):**
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/YOUR_USER/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
+```
+
 ### Option 2: Manual Install
+
+**Linux / macOS:**
 
 ```bash
 git clone https://github.com/YOUR_USER/antigravity-proxy.git
 cd antigravity-proxy
 bash deploy.sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/YOUR_USER/antigravity-proxy.git
+cd antigravity-proxy
+.\deploy.ps1
 ```
 
 The deployment script will guide you through:
@@ -90,6 +134,8 @@ The deployment script will guide you through:
 启动后先检查容器、配置挂载、凭证和模型列表：
 
 After startup, verify the container, config mount, credential, and model list:
+
+**Linux / macOS:**
 
 ```bash
 cd antigravity-proxy
@@ -110,6 +156,24 @@ curl -i http://127.0.0.1:8317/v1/models \
   -H "Authorization: Bearer ${API_KEY}"
 ```
 
+**Windows (PowerShell):**
+
+```powershell
+cd antigravity-proxy
+
+# Service status and loaded credentials
+.\deploy.ps1 status
+
+# Docker container status
+docker compose -f docker-compose.yml ps
+
+# Config must be a file inside the container, not a directory
+docker compose -f docker-compose.yml exec -T cliproxyapi sh -lc "test -f /CLIProxyAPI/config.yaml && ls -l /CLIProxyAPI/config.yaml"
+
+# API model list
+c
+```
+
 成功时 `/v1/models` 会返回真实模型列表，而不是空数组：
 
 On success, `/v1/models` returns real model IDs instead of an empty list:
@@ -122,6 +186,134 @@ On success, `/v1/models` returns real model IDs instead of an empty list:
   ]
 }
 ```
+
+---
+
+## 🧭 部署后如何使用 / How to Use After Deployment
+
+部署完成后，你会得到两个关键信息：
+
+After deployment, you need two values:
+
+| 项目 / Item | 默认值 / Default | 说明 / Description |
+|---|---|---|
+| Base URL | `http://127.0.0.1:8317` | CLIProxyAPI endpoint |
+| API Key | `config.yaml` 里的 `api-keys` | Client authentication token |
+
+### 1. 获取 API Key / Get the API Key
+
+**Linux / macOS:**
+
+```bash
+API_KEY=$(awk -F'"' '/- "sk-/{print $2; exit}' config.yaml)
+echo "$API_KEY"
+```
+
+**Windows (PowerShell):**
+
+```powershell
+$apiKey = (Select-String -Path config.yaml -Pattern '- "sk-([^"]+)"').Matches.Groups[1].Value
+$apiKey
+```
+
+### 2. 查看可用模型 / List Available Models
+
+Use this first. The model IDs returned here are the safest values to use in clients.
+
+**Linux / macOS:**
+
+```bash
+curl http://127.0.0.1:8317/v1/models \
+  -H "Authorization: Bearer ${API_KEY}"
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Invoke-WebRequest -Uri "http://127.0.0.1:8317/v1/models" `
+  -Headers @{ Authorization = "Bearer $apiKey" }
+```
+
+### 3. 发送测试请求 / Send a Test Request
+
+**OpenAI-compatible `/v1/chat/completions`:**
+
+```bash
+curl http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [
+      { "role": "user", "content": "Say hello in one sentence." }
+    ],
+    "stream": false
+  }'
+```
+
+**Anthropic-compatible `/v1/messages`:**
+
+```bash
+curl http://127.0.0.1:8317/v1/messages \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 256,
+    "messages": [
+      { "role": "user", "content": "Say hello in one sentence." }
+    ]
+  }'
+```
+
+Replace `claude-sonnet-4-6` with a model ID returned by `/v1/models`.
+
+### 4. 配置客户端 / Configure Clients
+
+For Claude Code, Cursor, or other Anthropic-compatible tools:
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8317"
+export ANTHROPIC_AUTH_TOKEN="${API_KEY}"
+```
+
+For OpenAI-compatible clients, use:
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:8317/v1"
+export OPENAI_API_KEY="${API_KEY}"
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8317"
+$env:ANTHROPIC_AUTH_TOKEN = $apiKey
+$env:OPENAI_BASE_URL = "http://127.0.0.1:8317/v1"
+$env:OPENAI_API_KEY = $apiKey
+```
+
+### 5. 远程服务器使用 / Use from a Remote Server
+
+For security, keep the proxy bound to localhost and use SSH port forwarding from your local machine:
+
+```bash
+ssh -L 8317:127.0.0.1:8317 user@your-server -p 22
+```
+
+Then your local client can still use:
+
+```text
+http://127.0.0.1:8317
+```
+
+### 6. 常见问题 / Common Checks
+
+- `401` means the client API key is wrong. Check `config.yaml`.
+- Empty `/v1/models` usually means OAuth login did not finish or no credential was loaded. Run `.\deploy.ps1 login` / `bash deploy.sh login`.
+- Connection refused means the service is not running or the port is different. Run `.\deploy.ps1 status` / `bash deploy.sh status`.
+- If the proxy runs on a server, do not use the server IP directly unless you intentionally expose the port. Prefer SSH forwarding.
 
 ---
 
@@ -146,11 +338,22 @@ After deployment, add to your VS Code `settings.json`:
 
 或者在 `~/.zshrc` / `~/.bashrc` 中添加 / Or add to your shell profile:
 
+**Linux / macOS:**
+
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8317"
 export ANTHROPIC_AUTH_TOKEN="your-api-key"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-6-thinking"
+```
+
+**Windows (PowerShell profile):**
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8317"
+$env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6-thinking"
 ```
 
 ### 指定模型 / Specify Models (Claude Code v2.x.x)
@@ -172,18 +375,18 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 
 ## 📋 命令参考 / Command Reference
 
-| 命令 / Command | 说明 / Description |
-|---|---|
-| `bash deploy.sh` | 交互式完整部署 / Full interactive deployment |
-| `bash deploy.sh login` | OAuth 登录 Provider / OAuth login |
-| `bash deploy.sh start` | 启动服务 / Start service |
-| `bash deploy.sh stop` | 停止服务 / Stop service |
-| `bash deploy.sh restart` | 重启服务 / Restart service |
-| `bash deploy.sh status` | 查看状态 / Check status |
-| `bash deploy.sh logs` | 实时日志 / Real-time logs |
-| `bash deploy.sh update` | 更新到最新版 / Update to latest |
-| `bash deploy.sh uninstall` | 完全卸载 / Full uninstall |
-| `bash deploy.sh help` | 显示帮助 / Show help |
+| 命令 / Command | Linux / macOS | Windows |
+|---|---|---|
+| 交互式完整部署 / Full interactive deployment | `bash deploy.sh` | `.\deploy.ps1` |
+| OAuth 登录 Provider / OAuth login | `bash deploy.sh login` | `.\deploy.ps1 login` |
+| 启动服务 / Start service | `bash deploy.sh start` | `.\deploy.ps1 start` |
+| 停止服务 / Stop service | `bash deploy.sh stop` | `.\deploy.ps1 stop` |
+| 重启服务 / Restart service | `bash deploy.sh restart` | `.\deploy.ps1 restart` |
+| 查看状态 / Check status | `bash deploy.sh status` | `.\deploy.ps1 status` |
+| 实时日志 / Real-time logs | `bash deploy.sh logs` | `.\deploy.ps1 logs` |
+| 更新到最新版 / Update to latest | `bash deploy.sh update` | `.\deploy.ps1 update` |
+| 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
+| 显示帮助 / Show help | `bash deploy.sh help` | `.\deploy.ps1 help` |
 
 ### 环境变量 / Environment Variables
 
@@ -197,14 +400,23 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 CPA_PORT=9000 bash deploy.sh start
 ```
 
+**Windows:**
+
+```powershell
+# 自定义端口启动 / Start with custom port
+$env:CPA_PORT=9000; .\deploy.ps1 start
+```
+
 ---
 
 ## 🏗️ 项目结构 / Project Structure
 
 ```
 antigravity-proxy/
-├── deploy.sh              # 主部署脚本 / Main deployment script
-├── install.sh             # 远程安装脚本 / Remote installer
+├── deploy.sh              # 主部署脚本 (Linux/macOS) / Main deployment script
+├── deploy.ps1             # 主部署脚本 (Windows) / Main deployment script (Windows)
+├── install.sh             # 远程安装脚本 (Linux/macOS) / Remote installer
+├── install.ps1            # 远程安装脚本 (Windows) / Remote installer (Windows)
 ├── docker-compose.yml     # Docker 编排 / Docker Compose
 ├── config.example.yaml    # 配置模板 / Config template
 ├── .env.example           # 可选环境变量示例 / Optional env example
@@ -225,6 +437,14 @@ antigravity-proxy/
 This usually happens after renaming/copying the project folder or starting the same container from a different Compose project. `docker ps` only shows running containers, so the conflicting container may be stopped.
 
 ```bash
+docker ps -a --filter name=antigravity-proxy
+docker rm antigravity-proxy
+docker compose up -d
+```
+
+**Windows:**
+
+```powershell
 docker ps -a --filter name=antigravity-proxy
 docker rm antigravity-proxy
 docker compose up -d
@@ -251,6 +471,14 @@ rmdir config.yaml
 bash deploy.sh
 ```
 
+**Windows:**
+
+```powershell
+docker compose down
+Remove-Item config.yaml
+.\deploy.ps1
+```
+
 `deploy.sh` 也会自动检测并提示删除空目录。
 
 </details>
@@ -262,9 +490,18 @@ bash deploy.sh
 
 The proxy is running, but no OAuth credential has been loaded yet. Run:
 
+**Linux / macOS:**
+
 ```bash
 bash deploy.sh login
 bash deploy.sh status
+```
+
+**Windows:**
+
+```powershell
+.\deploy.ps1 login
+.\deploy.ps1 status
 ```
 
 看到 `已登录凭证` 或 `loaded 1 file-based clients` 后，再请求 `/v1/models`。
@@ -324,9 +561,18 @@ CLIProxyAPI 支持多个 OAuth 账号轮询。多次运行 login 命令即可添
 
 CLIProxyAPI supports round-robin across multiple OAuth accounts. Run login multiple times to add accounts:
 
+**Linux / macOS:**
+
 ```bash
 bash deploy.sh login   # 登录第一个账号 / Login first account
 bash deploy.sh login   # 登录第二个账号 / Login second account
+```
+
+**Windows:**
+
+```powershell
+.\deploy.ps1 login   # 登录第一个账号 / Login first account
+.\deploy.ps1 login   # 登录第二个账号 / Login second account
 ```
 
 </details>
@@ -338,9 +584,18 @@ Cursor 也支持通过环境变量配置自定义 API 端点：
 
 Cursor also supports custom API endpoints via environment variables:
 
+**Linux / macOS:**
+
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8317"
 export ANTHROPIC_AUTH_TOKEN="your-api-key"
+```
+
+**Windows:**
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8317"
+$env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
 ```
 
 </details>
@@ -359,11 +614,12 @@ See [SECURITY.md](SECURITY.md) for the full checklist.
 
 ## 🚢 发布前检查 / Publish Checklist
 
-- Replace `YOUR_USER` in `README.md`, `install.sh`, and `deploy.sh`.
+- Replace `YOUR_USER` in `README.md`, `install.sh`, `install.ps1`, and `deploy.sh`/`deploy.ps1`.
 - Confirm `config.yaml` is not committed.
 - Run `bash -n deploy.sh` and `bash -n install.sh`.
+- Run `pwsh -NoProfile -Command "try { . .\deploy.ps1 } catch {}"` (syntax check).
 - Run `docker compose -f docker-compose.yml config --quiet`.
-- Run `bash deploy.sh status` and confirm the API test returns `200`.
+- Run `bash deploy.sh status` / `.\deploy.ps1 status` and confirm the API test returns `200`.
 - Test a fresh clone path before announcing the repo.
 
 ---
