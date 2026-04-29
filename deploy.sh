@@ -711,8 +711,21 @@ show_help() {
 # ========================== 入口 ==============================================
 
 main() {
-    # 加载 .env
-    [[ -f "${SCRIPT_DIR}/.env" ]] && source "${SCRIPT_DIR}/.env"
+    # 加载 .env（逐行解析，不 source，避免代码注入）
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            [[ "$line" != *=* ]] && continue
+            key="${line%%=*}"
+            value="${line#*=}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            value="${value#\"}" ; value="${value%\"}"
+            value="${value#\'}" ; value="${value%\'}"
+            export "$key=$value"
+        done < "${SCRIPT_DIR}/.env"
+    fi
 
     case "${1:-}" in
         login)      cmd_login ;;
