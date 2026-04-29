@@ -10,7 +10,7 @@ services:
     container_name: antigravity-proxy
     restart: unless-stopped
     ports:
-      - "${CPA_PORT:-8317}:8317"
+      - "${CPA_BIND_HOST:-127.0.0.1}:${CPA_PORT:-8317}:8317"
     volumes:
       - type: bind
         source: ./config.yaml
