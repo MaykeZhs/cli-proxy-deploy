@@ -8,6 +8,7 @@
 #
 #   用法:  .\deploy.ps1          # 交互式完整部署
 #          .\deploy.ps1 login    # 仅 OAuth 登录
+#          .\deploy.ps1 logout   # 退出 Provider 账号
 #          .\deploy.ps1 start    # 仅启动服务
 #          .\deploy.ps1 stop     # 停止服务
 #          .\deploy.ps1 status   # 查看状态
@@ -449,6 +450,62 @@ function do-login($provider = 'antigravity') {
     info "$provider 登录成功"
 }
 
+function do-logout($provider) {
+    $authPattern = ''
+    $displayName = ''
+
+    switch ($provider) {
+        'antigravity' { $authPattern = 'antigravity*'; $displayName = 'Antigravity' }
+        'claude'      { $authPattern = 'claude*'; $displayName = 'Claude Code' }
+        'gemini'      { $authPattern = '*.json'; $displayName = 'Gemini CLI' }
+        'codex'       { $authPattern = 'codex*'; $displayName = 'Codex' }
+        'all'         { $authPattern = ''; $displayName = '所有 Provider' }
+        default       { error-msg "不支持的 Provider: $provider"; exit 1 }
+    }
+
+    # 检查凭证卷是否存在
+    $volumeExists = $false
+    try { $null = docker volume inspect $script:AUTH_VOLUME 2>$null; if ($LASTEXITCODE -eq 0) { $volumeExists = $true } } catch { }
+    if (-not $volumeExists) {
+        warn '未找到凭证存储卷，没有需要退出的账号'
+        return
+    }
+
+    # 列出匹配的凭证文件
+    $credFiles = ''
+    if ($provider -eq 'all') {
+        $credFiles = docker run --rm -v "$($script:AUTH_VOLUME):/auth" alpine sh -c "find /auth -maxdepth 1 -type f 2>/dev/null | grep -Ev '/(config|logs)$' | sed 's|/auth/||'" 2>$null
+    } else {
+        $credFiles = docker run --rm -v "$($script:AUTH_VOLUME):/auth" alpine sh -c "find /auth -maxdepth 1 -name '$authPattern' -type f 2>/dev/null | sed 's|/auth/||'" 2>$null
+    }
+
+    if (-not $credFiles) {
+        warn "未检测到 $displayName 的凭证文件"
+        return
+    }
+
+    Write-Host ''
+    Write-Host "     将要删除以下 $displayName 凭证文件:" -ForegroundColor Yellow
+    $credFiles -split "`n" | Where-Object { $_.Trim() } | ForEach-Object {
+        Write-Host "       • $_" -ForegroundColor DarkGray
+    }
+    Write-Host ''
+
+    if (-not (confirm-prompt "确认退出 ${displayName} 账号？" 'n')) {
+        info '取消操作'
+        return
+    }
+
+    # 删除凭证文件
+    if ($provider -eq 'all') {
+        docker run --rm -v "$($script:AUTH_VOLUME):/auth" alpine sh -c "find /auth -maxdepth 1 -type f | grep -Ev '/(config|logs)$' | xargs rm -f" 2>$null
+    } else {
+        docker run --rm -v "$($script:AUTH_VOLUME):/auth" alpine sh -c "find /auth -maxdepth 1 -name '$authPattern' -type f -exec rm -f {} +" 2>$null
+    }
+
+    info "$displayName 凭证已删除"
+}
+
 function start-service {
     step '启动代理服务'
 
@@ -553,6 +610,7 @@ function show-result {
     Write-Host '  .\deploy.ps1 stop       停止服务' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 update     更新到最新版本' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 login      重新 OAuth 登录' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 logout     退出 Provider 账号' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 uninstall  完全卸载' -ForegroundColor Cyan
     Write-Host ''
 }
@@ -621,6 +679,64 @@ function cmd-login {
     $runningContainers = docker ps --format '{{.Names}}' 2>$null
     if ($runningContainers -and ($runningContainers -match "^$script:CONTAINER_NAME$")) {
         if (confirm-prompt '服务正在运行，是否立即重启以应用新凭证？' 'y') {
+            Push-Location $script:SCRIPT_DIR
+            try {
+                $env:CPA_PORT = $script:CPA_PORT
+                Invoke-Compose -f $script:COMPOSE_FILE restart 2>&1 | Select-Object -Last 1
+                info '服务已重启'
+            } finally { Pop-Location }
+        }
+    }
+}
+
+function cmd-logout {
+    banner
+    $script:COMPOSE_CMD = detect-compose
+    if (-not $script:COMPOSE_CMD) { error-msg 'Docker Compose 不可用'; exit 1 }
+
+    # 检查凭证卷
+    $volumeExists = $false
+    try { $null = docker volume inspect $script:AUTH_VOLUME 2>$null; if ($LASTEXITCODE -eq 0) { $volumeExists = $true } } catch { }
+    if (-not $volumeExists) {
+        warn '未找到凭证存储卷，没有已登录的账号'
+        return
+    }
+
+    # 显示当前凭证状态
+    step '当前已登录凭证'
+    $credInfo = docker run --rm -v "$($script:AUTH_VOLUME):/auth" alpine sh -c "ls /auth/ 2>/dev/null | grep -Ev '^(config|logs)$' | tr '\n' ' '" 2>$null
+    if (-not $credInfo) {
+        warn '当前没有已登录的账号'
+        return
+    }
+    Write-Host "     $credInfo" -ForegroundColor DarkGray
+
+    Write-Host ''
+    Write-Host '  选择要退出的 Provider' -ForegroundColor White
+    Write-Host ''
+    Write-Host '  1) Antigravity    (Google DeepMind)' -ForegroundColor Cyan
+    Write-Host '  2) Claude Code    (Anthropic)' -ForegroundColor Cyan
+    Write-Host '  3) Gemini CLI     (Google)' -ForegroundColor Cyan
+    Write-Host '  4) Codex          (OpenAI)' -ForegroundColor Cyan
+    Write-Host '  5) 全部退出      (清除所有凭证)' -ForegroundColor Cyan
+    Write-Host ''
+    ask '选择' '1'
+    $choice = (Read-Host).Trim()
+    if (-not $choice) { $choice = '1' }
+
+    switch ($choice) {
+        '1' { do-logout 'antigravity' }
+        '2' { do-logout 'claude' }
+        '3' { do-logout 'gemini' }
+        '4' { do-logout 'codex' }
+        '5' { do-logout 'all' }
+        default { do-logout 'antigravity' }
+    }
+
+    # 重启服务（如果正在运行）
+    $runningContainers = docker ps --format '{{.Names}}' 2>$null
+    if ($runningContainers -and ($runningContainers -match "^$script:CONTAINER_NAME$")) {
+        if (confirm-prompt '服务正在运行，是否立即重启以应用变更？' 'y') {
             Push-Location $script:SCRIPT_DIR
             try {
                 $env:CPA_PORT = $script:CPA_PORT
@@ -821,6 +937,7 @@ function show-help {
     Write-Host '  命令:'
     Write-Host '    (无参数)     交互式完整部署 (推荐首次使用)' -ForegroundColor Cyan
     Write-Host '    login        OAuth 登录 Provider' -ForegroundColor Cyan
+    Write-Host '    logout       退出 Provider 账号' -ForegroundColor Cyan
     Write-Host '    start        启动服务' -ForegroundColor Cyan
     Write-Host '    stop         停止服务' -ForegroundColor Cyan
     Write-Host '    restart      重启服务' -ForegroundColor Cyan
@@ -872,6 +989,7 @@ function main {
 
     switch ($command) {
         'login'     { cmd-login @args }
+        'logout'    { cmd-logout }
         'start'     { cmd-start @args }
         'stop'      { cmd-stop @args }
         'restart'   { cmd-restart @args }

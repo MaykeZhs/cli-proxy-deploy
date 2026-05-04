@@ -8,6 +8,7 @@
 #
 #   用法:  bash deploy.sh          # 交互式完整部署
 #          bash deploy.sh login    # 仅 OAuth 登录
+#          bash deploy.sh logout   # 退出 Provider 账号
 #          bash deploy.sh start    # 仅启动服务
 #          bash deploy.sh stop     # 停止服务
 #          bash deploy.sh status   # 查看状态
@@ -370,6 +371,68 @@ do_login() {
     info "${provider} 登录成功"
 }
 
+do_logout() {
+    local provider="${1:-}"
+    local auth_pattern
+    local display_name
+
+    case "${provider}" in
+        antigravity) auth_pattern="antigravity*"; display_name="Antigravity" ;;
+        claude)      auth_pattern="claude*"; display_name="Claude Code" ;;
+        gemini)      auth_pattern="*.json"; display_name="Gemini CLI" ;;
+        codex)       auth_pattern="codex*"; display_name="Codex" ;;
+        all)         auth_pattern=""; display_name="所有 Provider" ;;
+        *)
+            error "不支持的 Provider: ${provider}"
+            exit 1
+            ;;
+    esac
+
+    # 检查凭证卷是否存在
+    if ! docker volume inspect "${AUTH_VOLUME}" &>/dev/null 2>&1; then
+        warn "未找到凭证存储卷，没有需要退出的账号"
+        return 0
+    fi
+
+    # 列出匹配的凭证文件
+    local cred_files
+    if [[ "${provider}" == "all" ]]; then
+        cred_files=$(docker run --rm -v "${AUTH_VOLUME}:/auth" alpine \
+            sh -c "find /auth -maxdepth 1 -type f 2>/dev/null | grep -Ev '/(config|logs)$' | sed 's|/auth/||'" 2>/dev/null || echo "")
+    else
+        cred_files=$(docker run --rm -v "${AUTH_VOLUME}:/auth" alpine \
+            sh -c "find /auth -maxdepth 1 -name '${auth_pattern}' -type f 2>/dev/null | sed 's|/auth/||'" 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "${cred_files}" ]]; then
+        warn "未检测到 ${display_name} 的凭证文件"
+        return 0
+    fi
+
+    echo ""
+    echo -e "     ${YELLOW}将要删除以下 ${display_name} 凭证文件:${NC}"
+    echo "${cred_files}" | while IFS= read -r f; do
+        echo -e "       ${DIM}• ${f}${NC}"
+    done
+    echo ""
+
+    if ! confirm "确认退出 ${display_name} 账号？" "n"; then
+        info "取消操作"
+        return 0
+    fi
+
+    # 删除凭证文件
+    if [[ "${provider}" == "all" ]]; then
+        docker run --rm -v "${AUTH_VOLUME}:/auth" alpine \
+            sh -c "find /auth -maxdepth 1 -type f | grep -Ev '/(config|logs)$' | xargs rm -f" 2>/dev/null
+    else
+        docker run --rm -v "${AUTH_VOLUME}:/auth" alpine \
+            sh -c "find /auth -maxdepth 1 -name '${auth_pattern}' -type f -exec rm -f {} +" 2>/dev/null
+    fi
+
+    info "${display_name} 凭证已删除"
+}
+
 start_service() {
     step "启动代理服务"
 
@@ -459,6 +522,7 @@ show_result() {
     echo -e "  ${CYAN}bash deploy.sh stop${NC}       停止服务"
     echo -e "  ${CYAN}bash deploy.sh update${NC}     更新到最新版本"
     echo -e "  ${CYAN}bash deploy.sh login${NC}      重新 OAuth 登录"
+    echo -e "  ${CYAN}bash deploy.sh logout${NC}     退出 Provider 账号"
     echo -e "  ${CYAN}bash deploy.sh uninstall${NC}  完全卸载"
     echo ""
 }
@@ -526,6 +590,60 @@ cmd_login() {
     # 重启服务（如果正在运行）
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
         if confirm "服务正在运行，是否立即重启以应用新凭证？" "y"; then
+            cd "${SCRIPT_DIR}"
+            CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" restart 2>&1 | tail -1
+            info "服务已重启"
+        fi
+    fi
+}
+
+cmd_logout() {
+    banner
+    COMPOSE_CMD="$(detect_compose)"
+    [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
+
+    # 检查凭证卷
+    if ! docker volume inspect "${AUTH_VOLUME}" &>/dev/null 2>&1; then
+        warn "未找到凭证存储卷，没有已登录的账号"
+        return 0
+    fi
+
+    # 显示当前凭证状态
+    step "当前已登录凭证"
+    local cred_info
+    cred_info=$(docker run --rm -v "${AUTH_VOLUME}:/auth" alpine \
+        sh -c "ls /auth/ 2>/dev/null | grep -Ev '^(config|logs)$' | tr '\\n' ' '" 2>/dev/null || echo "")
+    if [[ -z "${cred_info}" ]]; then
+        warn "当前没有已登录的账号"
+        return 0
+    fi
+    echo -e "     ${DIM}${cred_info}${NC}"
+
+    echo ""
+    echo -e "  ${BOLD}选择要退出的 Provider${NC}"
+    echo ""
+    echo -e "  ${CYAN}1)${NC} Antigravity    ${DIM}(Google DeepMind)${NC}"
+    echo -e "  ${CYAN}2)${NC} Claude Code    ${DIM}(Anthropic)${NC}"
+    echo -e "  ${CYAN}3)${NC} Gemini CLI     ${DIM}(Google)${NC}"
+    echo -e "  ${CYAN}4)${NC} Codex          ${DIM}(OpenAI)${NC}"
+    echo -e "  ${CYAN}5)${NC} 全部退出      ${DIM}(清除所有凭证)${NC}"
+    echo ""
+    ask "选择" "1"
+    read -r choice
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1) do_logout "antigravity" ;;
+        2) do_logout "claude" ;;
+        3) do_logout "gemini" ;;
+        4) do_logout "codex" ;;
+        5) do_logout "all" ;;
+        *) do_logout "antigravity" ;;
+    esac
+
+    # 重启服务（如果正在运行）
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+        if confirm "服务正在运行，是否立即重启以应用变更？" "y"; then
             cd "${SCRIPT_DIR}"
             CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" restart 2>&1 | tail -1
             info "服务已重启"
@@ -683,6 +801,7 @@ show_help() {
     echo -e "  ${BOLD}命令:${NC}"
     echo -e "    ${CYAN}(无参数)${NC}     交互式完整部署 (推荐首次使用)"
     echo -e "    ${CYAN}login${NC}        OAuth 登录 Provider"
+    echo -e "    ${CYAN}logout${NC}       退出 Provider 账号"
     echo -e "    ${CYAN}start${NC}        启动服务"
     echo -e "    ${CYAN}stop${NC}         停止服务"
     echo -e "    ${CYAN}restart${NC}      重启服务"
@@ -729,6 +848,7 @@ main() {
 
     case "${1:-}" in
         login)      cmd_login ;;
+        logout)     cmd_logout ;;
         start)      cmd_start ;;
         stop)       cmd_stop ;;
         restart)    cmd_restart ;;
