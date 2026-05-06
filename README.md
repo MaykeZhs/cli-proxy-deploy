@@ -45,17 +45,21 @@
 
 ### 方式一：远程一键安装
 
+默认安装到 `~/.antigravity-proxy`（Windows 为 `%USERPROFILE%\.antigravity-proxy`），再次运行会自动更新。
+
 **Linux / macOS:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
+
+> 如果执行策略阻止脚本，请使用：`pwsh -ExecutionPolicy Bypass -File .\install.ps1`
 
 ### 方式二：手动安装
 
@@ -67,13 +71,15 @@ cd antigravity-proxy
 bash deploy.sh
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 git clone https://github.com/MaykeZhs/antigravity-proxy.git
 cd antigravity-proxy
 .\deploy.ps1
 ```
+
+> 如果执行策略阻止脚本：`pwsh -ExecutionPolicy Bypass -File .\deploy.ps1`
 
 部署脚本会引导你完成：
 
@@ -83,11 +89,15 @@ cd antigravity-proxy
 4. ✅ 启动代理服务
 5. ✅ 输出 Claude Code for VS Code 配置
 
+> **首次部署 vs 日常管理：** `bash deploy.sh` / `.\deploy.ps1`（不带参数）会重新运行配置向导并生成新的 `config.yaml`。部署完成后，日常请使用 `start` / `stop` / `restart` / `login` / `logout` 等子命令，避免覆盖已有配置。
+
 ---
 
 ## 🚀 Quick Start
 
 ### Option 1: Remote One-Click Install
+
+Installs to `~/.antigravity-proxy` (Windows: `%USERPROFILE%\.antigravity-proxy`). Running again auto-updates.
 
 **Linux / macOS:**
 
@@ -95,11 +105,13 @@ cd antigravity-proxy
 curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
+
+> If the execution policy blocks the script: `pwsh -ExecutionPolicy Bypass -File .\install.ps1`
 
 ### Option 2: Manual Install
 
@@ -111,13 +123,15 @@ cd antigravity-proxy
 bash deploy.sh
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 git clone https://github.com/MaykeZhs/antigravity-proxy.git
 cd antigravity-proxy
 .\deploy.ps1
 ```
+
+> If the execution policy blocks the script: `pwsh -ExecutionPolicy Bypass -File .\deploy.ps1`
 
 The deployment script will guide you through:
 
@@ -126,6 +140,8 @@ The deployment script will guide you through:
 3. ✅ Provider selection & OAuth login
 4. ✅ Start the proxy service
 5. ✅ Output Claude Code for VS Code configuration
+
+> **First deploy vs daily use:** Running without arguments re-runs the config wizard and generates a new `config.yaml`. After initial deployment, use subcommands like `start` / `stop` / `restart` / `login` / `logout` to avoid overwriting your existing config.
 
 ---
 
@@ -381,6 +397,7 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 |---|---|---|
 | 交互式完整部署 / Full interactive deployment | `bash deploy.sh` | `.\deploy.ps1` |
 | OAuth 登录 Provider / OAuth login | `bash deploy.sh login` | `.\deploy.ps1 login` |
+| 退出 Provider 账号 / Logout provider | `bash deploy.sh logout` | `.\deploy.ps1 logout` |
 | 启动服务 / Start service | `bash deploy.sh start` | `.\deploy.ps1 start` |
 | 停止服务 / Stop service | `bash deploy.sh stop` | `.\deploy.ps1 stop` |
 | 重启服务 / Restart service | `bash deploy.sh restart` | `.\deploy.ps1 restart` |
@@ -432,6 +449,10 @@ cp .env.example .env
 | `CPA_PORT` | `8317` | 服务端口 / Service port |
 | `CPA_API_KEY` | *(auto-generated)* | API 密钥 / API key |
 | `CPA_MANAGEMENT_KEY` | *(auto-generated)* | 管理面板密码 / Management panel password |
+
+> **注意 / Note:** `CPA_API_KEY` 和 `CPA_MANAGEMENT_KEY` 仅在配置向导生成 `config.yaml` 时写入。如果 `config.yaml` 已存在，修改 `.env` 中的这两个值不会自动更新配置文件，需要手动编辑 `config.yaml` 或重新运行完整部署。
+>
+> `CPA_API_KEY` and `CPA_MANAGEMENT_KEY` are only written into `config.yaml` during the config wizard. Changing them in `.env` after `config.yaml` already exists has no effect — edit `config.yaml` directly or re-run the full deploy.
 
 > **安全提醒 / Security note:** 将 `CPA_BIND_HOST` 设为 `0.0.0.0` 会对外暴露代理，请确保设置强 API Key 并通过防火墙/安全组限制端口访问。
 >
@@ -623,6 +644,7 @@ api-keys:
   - "your-custom-key"
 debug: false
 request-retry: 3
+max-retry-interval: 30
 quota-exceeded:
   switch-project: true
   switch-preview-model: true
@@ -632,9 +654,11 @@ routing:
 streaming:
   keepalive-seconds: 15
   bootstrap-retries: 1
+nonstream-keepalive-interval: 30
 remote-management:
   allow-remote: false
   secret-key: "your-panel-password"
+  disable-control-panel: false
 ```
 
 完整配置选项参考 / Full config reference: [CLIProxyAPI Docs](https://help.router-for.me/configuration/basic.html)
