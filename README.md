@@ -390,6 +390,32 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 显示帮助 / Show help | `bash deploy.sh help` | `.\deploy.ps1 help` |
 
+### 更新 Docker 镜像 / Update Docker Image
+
+`update` 命令会拉取 `eceasy/cli-proxy-api:latest` 最新镜像，并用 Docker Compose 重新创建/更新服务。
+
+Use the `update` command when you want to upgrade the running proxy to the latest `eceasy/cli-proxy-api:latest` Docker image. It pulls the newest image and recreates the service with Docker Compose while keeping your `config.yaml` and OAuth credential volume.
+
+**Linux / macOS:**
+
+```bash
+# Pull the latest image and recreate the service
+bash deploy.sh update
+
+# Verify the updated service is running
+bash deploy.sh status
+```
+
+**Windows (PowerShell):**
+
+```powershell
+# Pull the latest image and recreate the service
+.\deploy.ps1 update
+
+# Verify the updated service is running
+.\deploy.ps1 status
+```
+
 ### 环境变量 / Environment Variables
 
 | 变量 / Variable | 默认值 / Default | 说明 / Description |
