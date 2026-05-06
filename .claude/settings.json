@@ -1,0 +1,13 @@
+{
+  "enabledPlugins": {
+    "everything-claude-code@everything-claude-code": true
+  },
+  "extraKnownMarketplaces": {
+    "ecc": {
+      "source": {
+        "source": "github",
+        "repo": "affaan-m/everything-claude-code"
+      }
+    }
+  }
+}

@@ -89,6 +89,8 @@ cd antigravity-proxy
 4. ✅ 启动代理服务
 5. ✅ 输出 Claude Code for VS Code 配置
 
+> **提示 / Tip:** 部署完成后运行 `bash deploy.sh setup-claude` / `.\deploy.ps1 setup-claude` 可一键写入 Claude Code CLI 配置。
+
 > **首次部署 vs 日常管理：** `bash deploy.sh` / `.\deploy.ps1`（不带参数）会重新运行配置向导并生成新的 `config.yaml`。部署完成后，日常请使用 `start` / `stop` / `restart` / `login` / `logout` 等子命令，避免覆盖已有配置。
 
 ---
@@ -140,6 +142,8 @@ The deployment script will guide you through:
 3. ✅ Provider selection & OAuth login
 4. ✅ Start the proxy service
 5. ✅ Output Claude Code for VS Code configuration
+
+> **Tip:** After deployment, run `bash deploy.sh setup-claude` / `.\deploy.ps1 setup-claude` to auto-configure Claude Code CLI.
 
 > **First deploy vs daily use:** Running without arguments re-runs the config wizard and generates a new `config.yaml`. After initial deployment, use subcommands like `start` / `stop` / `restart` / `login` / `logout` to avoid overwriting your existing config.
 
@@ -405,6 +409,7 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 实时日志 / Real-time logs | `bash deploy.sh logs` | `.\deploy.ps1 logs` |
 | 更新到最新版 / Update to latest | `bash deploy.sh update` | `.\deploy.ps1 update` |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
+| 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
 | 显示帮助 / Show help | `bash deploy.sh help` | `.\deploy.ps1 help` |
 
 ### 更新 Docker 镜像 / Update Docker Image
@@ -498,6 +503,28 @@ http://127.0.0.1:8317/management.html
 
 The password is the `CPA_MANAGEMENT_KEY` shown during deployment, also stored in `config.yaml` under `remote-management.secret-key`.
 
+### 一键配置 Claude Code / Setup Claude Code
+
+部署完成后，运行 `setup-claude` 自动将代理地址和 API Key 写入 Claude Code CLI 的全局配置（`~/.claude/settings.json`），同时启用 [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code) 插件市场。
+
+After deployment, run `setup-claude` to automatically write the proxy URL and API key into Claude Code CLI's global config (`~/.claude/settings.json`), and enable the [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code) plugin marketplace.
+
+**Linux / macOS:**
+
+```bash
+bash deploy.sh setup-claude
+```
+
+**Windows (PowerShell):**
+
+```powershell
+.\deploy.ps1 setup-claude
+```
+
+运行后无需手动设置环境变量或编辑 VS Code 配置，直接在终端运行 `claude` 即可使用代理。
+
+After running, you can use `claude` directly in the terminal without manually setting environment variables or editing VS Code settings.
+
 ---
 
 ## 🏗️ 项目结构 / Project Structure
@@ -511,6 +538,7 @@ antigravity-proxy/
 ├── docker-compose.yml     # Docker 编排 / Docker Compose
 ├── config.example.yaml    # 配置模板 / Config template
 ├── .env.example           # 可选环境变量示例 / Optional env example
+├── .claude/settings.json  # Claude Code 共享配置 (ECC) / Shared Claude Code config
 ├── SECURITY.md            # 安全说明 / Security notes
 ├── LICENSE
 └── README.md

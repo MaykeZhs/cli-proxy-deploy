@@ -15,6 +15,7 @@
 #          bash deploy.sh logs     # 实时日志
 #          bash deploy.sh update   # 更新到最新版
 #          bash deploy.sh uninstall # 完全卸载
+#          bash deploy.sh setup-claude # 配置 Claude Code
 #
 # =============================================================================
 
@@ -523,6 +524,7 @@ show_result() {
     echo -e "  ${CYAN}bash deploy.sh update${NC}     更新到最新版本"
     echo -e "  ${CYAN}bash deploy.sh login${NC}      重新 OAuth 登录"
     echo -e "  ${CYAN}bash deploy.sh logout${NC}     退出 Provider 账号"
+    echo -e "  ${CYAN}bash deploy.sh setup-claude${NC} 自动配置 Claude Code"
     echo -e "  ${CYAN}bash deploy.sh uninstall${NC}  完全卸载"
     echo ""
 }
@@ -788,6 +790,76 @@ cmd_uninstall() {
     info "卸载完成"
 }
 
+# ========================== setup-claude ======================================
+
+cmd_setup_claude() {
+    local port="${CPA_PORT:-8317}"
+    local api_key="${CPA_API_KEY}"
+
+    if [[ -z "$api_key" && -f "$CONFIG_FILE" ]]; then
+        api_key=$(awk -F'"' '/^\s*-\s*"/{print $2; exit}' "$CONFIG_FILE")
+    fi
+
+    if [[ -z "$api_key" ]]; then
+        error "未找到 API Key。请先运行部署或设置 CPA_API_KEY"
+        error "API Key not found. Run deploy first or set CPA_API_KEY"
+        exit 1
+    fi
+
+    local settings_dir="${HOME}/.claude"
+    local settings_file="${settings_dir}/settings.json"
+    local base_url="http://127.0.0.1:${port}"
+
+    mkdir -p "$settings_dir"
+
+    local merged
+    if command -v python3 &>/dev/null; then
+        merged=$(python3 - "$settings_file" "$base_url" "$api_key" <<'PYEOF'
+import json, sys, os
+path, base_url, api_key = sys.argv[1], sys.argv[2], sys.argv[3]
+settings = {}
+if os.path.isfile(path):
+    with open(path) as f:
+        settings = json.load(f)
+env = settings.setdefault("env", {})
+env["ANTHROPIC_BASE_URL"] = base_url
+env["ANTHROPIC_AUTH_TOKEN"] = api_key
+mkts = settings.setdefault("extraKnownMarketplaces", {})
+mkts["ecc"] = {"source": {"source": "github", "repo": "affaan-m/everything-claude-code"}}
+print(json.dumps(settings, indent=2, ensure_ascii=False))
+PYEOF
+        )
+    elif command -v node &>/dev/null; then
+        merged=$(node -e "
+const fs=require('fs'),p=process.argv[1],u=process.argv[2],k=process.argv[3];
+let s={};try{s=JSON.parse(fs.readFileSync(p,'utf8'))}catch{}
+s.env=s.env||{};s.env.ANTHROPIC_BASE_URL=u;s.env.ANTHROPIC_AUTH_TOKEN=k;
+s.extraKnownMarketplaces=s.extraKnownMarketplaces||{};
+s.extraKnownMarketplaces.ecc={source:{source:'github',repo:'affaan-m/everything-claude-code'}};
+console.log(JSON.stringify(s,null,2));
+" "$settings_file" "$base_url" "$api_key")
+    else
+        error "需要 python3 或 node 来操作 JSON 配置"
+        error "python3 or node is required for JSON manipulation"
+        exit 1
+    fi
+
+    echo "$merged" > "$settings_file"
+
+    echo ""
+    info "Claude Code 已配置 / Claude Code configured"
+    echo ""
+    echo -e "  ${BOLD}${settings_file}${NC} 已更新:"
+    echo ""
+    echo -e "  ANTHROPIC_BASE_URL   ${GREEN}${base_url}${NC}"
+    echo -e "  ANTHROPIC_AUTH_TOKEN  ${GREEN}${api_key}${NC}"
+    echo -e "  ECC 插件市场          ${GREEN}已启用 / enabled${NC}"
+    echo ""
+    echo -e "  ${DIM}现在可以直接运行 claude 命令使用代理${NC}"
+    echo -e "  ${DIM}You can now run 'claude' directly with the proxy${NC}"
+    echo ""
+}
+
 # ========================== 帮助信息 ==========================================
 
 show_help() {
@@ -809,6 +881,7 @@ show_help() {
     echo -e "    ${CYAN}logs${NC}         查看实时日志"
     echo -e "    ${CYAN}update${NC}       更新到最新版本"
     echo -e "    ${CYAN}uninstall${NC}    完全卸载"
+    echo -e "    ${CYAN}setup-claude${NC} 自动配置 Claude Code 环境"
     echo -e "    ${CYAN}help${NC}         显示此帮助"
     echo ""
     echo -e "  ${BOLD}环境变量:${NC}"
@@ -856,6 +929,7 @@ main() {
         logs)       cmd_logs ;;
         update)     cmd_update ;;
         uninstall)  cmd_uninstall ;;
+        setup-claude) cmd_setup_claude ;;
         help|--help|-h) show_help ;;
         "")         cmd_deploy ;;
         *)          error "未知命令: $1"; show_help; exit 1 ;;

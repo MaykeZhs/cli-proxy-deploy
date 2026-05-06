@@ -15,6 +15,7 @@
 #          .\deploy.ps1 logs     # 实时日志
 #          .\deploy.ps1 update   # 更新到最新版
 #          .\deploy.ps1 uninstall # 完全卸载
+#          .\deploy.ps1 setup-claude # 配置 Claude Code
 #
 # =============================================================================
 
@@ -611,6 +612,7 @@ function show-result {
     Write-Host '  .\deploy.ps1 update     更新到最新版本' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 login      重新 OAuth 登录' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 logout     退出 Provider 账号' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 setup-claude 自动配置 Claude Code' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 uninstall  完全卸载' -ForegroundColor Cyan
     Write-Host ''
 }
@@ -924,6 +926,68 @@ function cmd-uninstall {
     info '卸载完成'
 }
 
+# ========================== setup-claude ======================================
+
+function cmd-setup-claude {
+    $port = $script:CPA_PORT
+    $apiKey = $script:CPA_API_KEY
+
+    if (-not $apiKey -and (Test-Path $script:CONFIG_FILE)) {
+        $match = Select-String -Path $script:CONFIG_FILE -Pattern '^\s*-\s*"([^"]+)"' | Select-Object -First 1
+        if ($match) { $apiKey = $match.Matches.Groups[1].Value }
+    }
+
+    if (-not $apiKey) {
+        error-msg '未找到 API Key。请先运行部署或设置 CPA_API_KEY'
+        error-msg 'API Key not found. Run deploy first or set CPA_API_KEY'
+        exit 1
+    }
+
+    $settingsDir = Join-Path $HOME '.claude'
+    $settingsFile = Join-Path $settingsDir 'settings.json'
+    $baseUrl = "http://127.0.0.1:$port"
+
+    if (-not (Test-Path $settingsDir)) {
+        New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+    }
+
+    $settings = @{}
+    if (Test-Path $settingsFile) {
+        try {
+            $settings = Get-Content $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+        } catch {
+            $settings = @{}
+        }
+    }
+
+    if (-not $settings.ContainsKey('env')) { $settings['env'] = @{} }
+    $settings['env']['ANTHROPIC_BASE_URL'] = $baseUrl
+    $settings['env']['ANTHROPIC_AUTH_TOKEN'] = $apiKey
+
+    if (-not $settings.ContainsKey('extraKnownMarketplaces')) { $settings['extraKnownMarketplaces'] = @{} }
+    $settings['extraKnownMarketplaces']['ecc'] = @{
+        source = @{
+            source = 'github'
+            repo   = 'affaan-m/everything-claude-code'
+        }
+    }
+
+    $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
+
+    Write-Host ''
+    info 'Claude Code 已配置 / Claude Code configured'
+    Write-Host ''
+    Write-Host "  $settingsFile 已更新:"
+    Write-Host ''
+    Write-Host "  ANTHROPIC_BASE_URL   $baseUrl" -ForegroundColor Green
+    Write-Host "  ANTHROPIC_AUTH_TOKEN  $apiKey" -ForegroundColor Green
+    Write-Host '  ECC 插件市场          已启用 / enabled' -ForegroundColor Green
+    Write-Host ''
+    Write-Host '  现在可以直接运行 claude 命令使用代理' -ForegroundColor DarkGray
+    Write-Host '  You can now run "claude" directly with the proxy' -ForegroundColor DarkGray
+    Write-Host ''
+}
+
 # ========================== 帮助信息 ==========================================
 
 function show-help {
@@ -945,6 +1009,7 @@ function show-help {
     Write-Host '    logs         查看实时日志' -ForegroundColor Cyan
     Write-Host '    update       更新到最新版本' -ForegroundColor Cyan
     Write-Host '    uninstall    完全卸载' -ForegroundColor Cyan
+    Write-Host '    setup-claude 自动配置 Claude Code 环境' -ForegroundColor Cyan
     Write-Host '    help         显示此帮助' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  环境变量:'
@@ -997,6 +1062,7 @@ function main {
         'logs'      { cmd-logs @args }
         'update'    { cmd-update @args }
         'uninstall' { cmd-uninstall @args }
+        'setup-claude' { cmd-setup-claude }
         'help'      { show-help }
         '--help'    { show-help }
         '-h'        { show-help }
