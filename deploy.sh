@@ -164,7 +164,7 @@ check_prereqs() {
 
 generate_key() {
     # 生成 sk- 前缀的随机 API key
-    echo "sk-$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 32)"
+    echo "sk-$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 32 || :)"
 }
 
 ensure_config_file_slot() {
@@ -228,7 +228,7 @@ config_wizard() {
     # Management panel
     if confirm "是否启用管理面板？" "y"; then
         local default_mgmt_key
-        default_mgmt_key="$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 16)"
+        default_mgmt_key="$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 16 || :)"
         ask "管理面板密码" "${default_mgmt_key}"
         read -r input_mgmt
         CPA_MANAGEMENT_KEY="${input_mgmt:-$default_mgmt_key}"
@@ -490,7 +490,7 @@ show_result() {
     echo -e "  代理地址  ${GREEN}http://127.0.0.1:${CPA_PORT}${NC}"
     echo -e "  API 密钥  ${GREEN}${CPA_API_KEY}${NC}"
     if [[ -n "${CPA_MANAGEMENT_KEY}" ]]; then
-        echo -e "  管理面板  ${GREEN}http://127.0.0.1:${CPA_PORT}/panel${NC}"
+        echo -e "  管理面板  ${GREEN}http://127.0.0.1:${CPA_PORT}/management.html${NC}"
         echo -e "  面板密码  ${GREEN}${CPA_MANAGEMENT_KEY}${NC}"
     fi
     echo ""

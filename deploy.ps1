@@ -578,7 +578,7 @@ function show-result {
     Write-Host "  代理地址  http://127.0.0.1:$($script:CPA_PORT)" -ForegroundColor Green
     Write-Host "  API 密钥  $script:CPA_API_KEY" -ForegroundColor Green
     if ($script:CPA_MANAGEMENT_KEY) {
-        Write-Host "  管理面板  http://127.0.0.1:$($script:CPA_PORT)/panel" -ForegroundColor Green
+        Write-Host "  管理面板  http://127.0.0.1:$($script:CPA_PORT)/management.html" -ForegroundColor Green
         Write-Host "  面板密码  $script:CPA_MANAGEMENT_KEY" -ForegroundColor Green
     }
     Write-Host ''

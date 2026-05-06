@@ -418,10 +418,36 @@ bash deploy.sh status
 
 ### 环境变量 / Environment Variables
 
+复制 `.env.example` 为 `.env` 即可覆盖默认配置，无需修改脚本或 `docker-compose.yml`。
+
+Copy `.env.example` to `.env` to override defaults without editing scripts or `docker-compose.yml`.
+
+```bash
+cp .env.example .env
+```
+
 | 变量 / Variable | 默认值 / Default | 说明 / Description |
 |---|---|---|
+| `CPA_BIND_HOST` | `127.0.0.1` | 监听地址。本机使用保持默认；云服务器需外部访问时改为 `0.0.0.0` / Bind address. Keep default for local; set `0.0.0.0` to expose on cloud servers |
 | `CPA_PORT` | `8317` | 服务端口 / Service port |
 | `CPA_API_KEY` | *(auto-generated)* | API 密钥 / API key |
+| `CPA_MANAGEMENT_KEY` | *(auto-generated)* | 管理面板密码 / Management panel password |
+
+> **安全提醒 / Security note:** 将 `CPA_BIND_HOST` 设为 `0.0.0.0` 会对外暴露代理，请确保设置强 API Key 并通过防火墙/安全组限制端口访问。
+>
+> Setting `CPA_BIND_HOST` to `0.0.0.0` exposes the proxy externally. Make sure you use a strong API key and restrict port access via firewall or security groups.
+
+**修改 `.env` 后需要重建容器（`restart` 不会更新端口绑定）：**
+
+**After changing `.env`, recreate the container (`restart` does not update port bindings):**
+
+```bash
+bash deploy.sh stop && bash deploy.sh start
+```
+
+```powershell
+.\deploy.ps1 stop; .\deploy.ps1 start
+```
 
 ```bash
 # 自定义端口启动 / Start with custom port
@@ -434,6 +460,22 @@ CPA_PORT=9000 bash deploy.sh start
 # 自定义端口启动 / Start with custom port
 $env:CPA_PORT=9000; .\deploy.ps1 start
 ```
+
+### 管理面板 / Management Panel
+
+部署时配置向导会询问是否启用管理面板并生成密码。启用后可通过 Web UI 查看代理状态。
+
+The deploy wizard asks whether to enable the management panel and generates a password. Once enabled, you can monitor proxy status via a Web UI.
+
+**访问地址 / Access URL:**
+
+```
+http://127.0.0.1:8317/management.html
+```
+
+**密码 / Password:** 部署时显示的 `CPA_MANAGEMENT_KEY`，也保存在 `config.yaml` 的 `remote-management.secret-key` 中。
+
+The password is the `CPA_MANAGEMENT_KEY` shown during deployment, also stored in `config.yaml` under `remote-management.secret-key`.
 
 ---
 
