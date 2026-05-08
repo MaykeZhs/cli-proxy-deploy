@@ -797,7 +797,7 @@ cmd_setup_claude() {
     local api_key="${CPA_API_KEY}"
 
     if [[ -z "$api_key" && -f "$CONFIG_FILE" ]]; then
-        api_key=$(awk -F'"' '/^\s*-\s*"/{print $2; exit}' "$CONFIG_FILE")
+        api_key=$(awk -F'"' '/^[[:space:]]*-[[:space:]]*"/{print $2; exit}' "$CONFIG_FILE")
     fi
 
     if [[ -z "$api_key" ]]; then
