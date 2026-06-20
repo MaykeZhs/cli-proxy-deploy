@@ -13,6 +13,10 @@
 #          .\deploy.ps1 stop     # 停止服务
 #          .\deploy.ps1 status   # 查看状态
 #          .\deploy.ps1 logs     # 实时日志
+#          .\deploy.ps1 doctor   # 自检诊断
+#          .\deploy.ps1 backup   # 备份配置和凭证
+#          .\deploy.ps1 restore <file> # 恢复配置和凭证
+#          .\deploy.ps1 check-update # 检查镜像更新
 #          .\deploy.ps1 update   # 更新到最新版
 #          .\deploy.ps1 uninstall # 完全卸载
 #          .\deploy.ps1 setup-claude # 配置 Claude Code
@@ -38,6 +42,7 @@ $script:COMPOSE_FILE   = Join-Path $script:SCRIPT_DIR 'docker-compose.yml'
 $script:CPA_PORT           = if ($env:CPA_PORT)           { $env:CPA_PORT }           else { '8317' }
 $script:CPA_API_KEY        = if ($env:CPA_API_KEY)        { $env:CPA_API_KEY }        else { '' }
 $script:CPA_MANAGEMENT_KEY = if ($env:CPA_MANAGEMENT_KEY) { $env:CPA_MANAGEMENT_KEY } else { '' }
+$script:CPA_API_KEYS       = @()
 
 # ========================== 颜色 & 样式 ======================================
 
@@ -201,6 +206,122 @@ function generate-key {
     return "sk-$rng"
 }
 
+function ConvertTo-YamlDoubleQuotedValue($value) {
+    return $value.Replace('\', '\\').Replace('"', '\"')
+}
+
+function Set-ApiKeysFromInput($inputText, $defaultKey) {
+    $keys = @()
+    if ($inputText) {
+        $keys = $inputText -split ',' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ }
+    }
+
+    if (-not $keys -or $keys.Count -eq 0) {
+        $keys = @($defaultKey)
+    }
+
+    $script:CPA_API_KEYS = @($keys)
+    $script:CPA_API_KEY = $script:CPA_API_KEYS[0]
+}
+
+function Get-ConfigApiKeys {
+    if (-not (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        return @()
+    }
+
+    $keys = @()
+    $inKeys = $false
+    foreach ($line in Get-Content $script:CONFIG_FILE) {
+        if ($line -match '^api-keys:\s*$') {
+            $inKeys = $true
+            continue
+        }
+        if ($inKeys -and $line -match '^\S') {
+            break
+        }
+        if ($inKeys -and $line -match '^\s*-\s*(.+?)\s*(?:#.*)?$') {
+            $value = $Matches[1].Trim()
+            if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            if ($value) {
+                $keys += $value
+            }
+        }
+    }
+
+    return @($keys)
+}
+
+function Sync-ApiKeyFromConfig {
+    if (-not $script:CPA_API_KEY -and (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        $keys = @(Get-ConfigApiKeys)
+        if ($keys.Count -gt 0) {
+            $script:CPA_API_KEY = $keys[0]
+        }
+    }
+}
+
+function Resolve-BackupPath($requestedPath) {
+    if (-not $requestedPath) {
+        $backupDir = Join-Path $script:SCRIPT_DIR 'backups'
+        return (Join-Path $backupDir ("antigravity-proxy-backup-{0}.tgz" -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
+    }
+
+    if ([System.IO.Path]::IsPathRooted($requestedPath)) {
+        return $requestedPath
+    }
+
+    return (Join-Path $script:SCRIPT_DIR $requestedPath)
+}
+
+function Get-LocalImageDigest {
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $repoDigest = docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' $script:DOCKER_IMAGE 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $repoDigest) { return '' }
+        return (($repoDigest | Select-Object -First 1) -split '@')[-1]
+    } catch {
+        return ''
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+    }
+}
+
+function Get-RemoteImageDigest {
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $output = docker manifest inspect --verbose $script:DOCKER_IMAGE 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $output) { return '' }
+        foreach ($line in $output) {
+            if ($line -match '"digest"\s*:\s*"(sha256:[^"]+)"') {
+                return $Matches[1]
+            }
+        }
+        return ''
+    } catch {
+        return ''
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+    }
+}
+
 function ensure-config-file-slot {
     if (-not (Test-Path $script:CONFIG_FILE -PathType Container)) {
         return
@@ -248,10 +369,14 @@ function config-wizard {
 
     # API Key
     $defaultKey = generate-key
-    ask '设置 API 密钥 (用于客户端认证)' $defaultKey
+    ask '设置 API 密钥（多个用英文逗号分隔，回车=随机生成）' $defaultKey
     $inputKey = (Read-Host).Trim()
-    $script:CPA_API_KEY = if ($inputKey) { $inputKey } else { $defaultKey }
-    info "API 密钥: $script:CPA_API_KEY"
+    Set-ApiKeysFromInput $inputKey $defaultKey
+    if ($script:CPA_API_KEYS.Count -eq 1) {
+        info "API 密钥: $script:CPA_API_KEY"
+    } else {
+        info "API 密钥: 共 $($script:CPA_API_KEYS.Count) 个"
+    }
 
     # Port
     ask '服务端口' $script:CPA_PORT
@@ -281,6 +406,9 @@ function config-wizard {
 
     # Generate config.yaml
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $apiKeysYaml = ($script:CPA_API_KEYS | ForEach-Object {
+        '  - "' + (ConvertTo-YamlDoubleQuotedValue $_) + '"'
+    }) -join [Environment]::NewLine
     $configContent = @"
 # =============================================================================
 #  Antigravity Proxy 配置文件
@@ -293,7 +421,7 @@ port: 8317
 auth-dir: "/root/.cli-proxy-api"
 
 api-keys:
-  - "$script:CPA_API_KEY"
+$apiKeysYaml
 
 debug: $debugMode
 
@@ -396,6 +524,8 @@ function do-login($provider = 'antigravity') {
         default       { error-msg "不支持的 Provider: $provider"; exit 1 }
     }
 
+    require-config-file
+
     # 检查已有凭证
     $volumeExists = $false
     try { $null = docker volume inspect $script:AUTH_VOLUME 2>$null; if ($LASTEXITCODE -eq 0) { $volumeExists = $true } } catch { }
@@ -426,7 +556,7 @@ function do-login($provider = 'antigravity') {
     try {
         docker run --rm -it `
             -p "${oauthPort}:${oauthPort}" `
-            -v "$($script:CONFIG_FILE):/CLIProxyAPI/config.yaml:ro" `
+            -v "$($script:CONFIG_FILE):/CLIProxyAPI/config.yaml" `
             -v "$($script:AUTH_VOLUME):/root/.cli-proxy-api" `
             $script:DOCKER_IMAGE `
             ./CLIProxyAPI `
@@ -511,6 +641,7 @@ function start-service {
     step '启动代理服务'
 
     require-config-file
+    Sync-ApiKeyFromConfig
 
     Push-Location $script:SCRIPT_DIR
 
@@ -570,6 +701,9 @@ function start-service {
 # ========================== 显示最终信息 ======================================
 
 function show-result {
+    Sync-ApiKeyFromConfig
+    $apiKeys = @(Get-ConfigApiKeys)
+
     Write-Host ''
     Write-Host '  🎉 部署完成！' -ForegroundColor Green
     Write-Host ''
@@ -577,7 +711,11 @@ function show-result {
     Write-Host ''
     Write-Host '  服务信息'
     Write-Host "  代理地址  http://127.0.0.1:$($script:CPA_PORT)" -ForegroundColor Green
-    Write-Host "  API 密钥  $script:CPA_API_KEY" -ForegroundColor Green
+    if ($apiKeys.Count -gt 1) {
+        Write-Host "  API 密钥  $script:CPA_API_KEY (共 $($apiKeys.Count) 个)" -ForegroundColor Green
+    } else {
+        Write-Host "  API 密钥  $script:CPA_API_KEY" -ForegroundColor Green
+    }
     if ($script:CPA_MANAGEMENT_KEY) {
         Write-Host "  管理面板  http://127.0.0.1:$($script:CPA_PORT)/management.html" -ForegroundColor Green
         Write-Host "  面板密码  $script:CPA_MANAGEMENT_KEY" -ForegroundColor Green
@@ -609,6 +747,9 @@ function show-result {
     Write-Host '  .\deploy.ps1 logs       查看实时日志' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 restart    重启服务' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 stop       停止服务' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 doctor     自检 Docker/配置/凭证/API' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 backup     备份配置和 OAuth 凭证' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 check-update 检查镜像更新' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 update     更新到最新版本' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 login      重新 OAuth 登录' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 logout     退出 Provider 账号' -ForegroundColor Cyan
@@ -622,6 +763,26 @@ function show-result {
 function cmd-deploy {
     banner
     check-prereqs
+
+    if (Test-Path $script:CONFIG_FILE -PathType Leaf) {
+        step '检测到已有 config.yaml'
+        Write-Host '  1) 重新配置（覆盖现有 config 与全部 key）' -ForegroundColor Cyan
+        Write-Host '  2) 保留并仅启动' -ForegroundColor Cyan
+        Write-Host ''
+        ask '选择' '2'
+        $configChoice = (Read-Host).Trim()
+        if (-not $configChoice) { $configChoice = '2' }
+
+        if ($configChoice -ne '1') {
+            info '保留现有配置，仅启动服务'
+            start-service
+            show-result
+            return
+        }
+
+        warn '将覆盖现有 config.yaml 与全部 API key'
+    }
+
     config-wizard
     pull-image
 
@@ -656,6 +817,7 @@ function cmd-login {
     banner
     $script:COMPOSE_CMD = detect-compose
     if (-not $script:COMPOSE_CMD) { error-msg 'Docker Compose 不可用'; exit 1 }
+    require-config-file
 
     Write-Host ''
     Write-Host '  选择要登录的 Provider' -ForegroundColor White
@@ -754,15 +916,7 @@ function cmd-start {
     if (-not $script:COMPOSE_CMD) { error-msg 'Docker Compose 不可用'; exit 1 }
 
     # 尝试从现有 config 读取 API key
-    if ((Test-Path $script:CONFIG_FILE -PathType Leaf) -and -not $script:CPA_API_KEY) {
-        $lines = Get-Content $script:CONFIG_FILE
-        foreach ($line in $lines) {
-            if ($line -match '^\s*-\s*"(sk-[^"]+)"') {
-                $script:CPA_API_KEY = $Matches[1]
-                break
-            }
-        }
-    }
+    Sync-ApiKeyFromConfig
 
     start-service
 
@@ -805,16 +959,8 @@ function cmd-status {
         Write-Host ''
 
         # 尝试从现有 config 读取 API key
-        if ((Test-Path $script:CONFIG_FILE -PathType Leaf) -and -not $script:CPA_API_KEY) {
-            $lines = Get-Content $script:CONFIG_FILE
-            foreach ($line in $lines) {
-                if ($line -match '^\s*-\s*"(sk-[^"]+)"') {
-                    $script:CPA_API_KEY = $Matches[1]
-                    break
-                }
-            }
-            if (-not $script:CPA_API_KEY) { $script:CPA_API_KEY = 'dummy' }
-        }
+        Sync-ApiKeyFromConfig
+        if (-not $script:CPA_API_KEY) { $script:CPA_API_KEY = 'dummy' }
 
         # 从容器端口映射获取实际端口
         $mappedPort = docker port $script:CONTAINER_NAME 8317/tcp 2>$null
@@ -871,6 +1017,341 @@ function cmd-logs {
         $env:CPA_PORT = $script:CPA_PORT
         Invoke-Compose -f $script:COMPOSE_FILE logs -f --tail 100
     } finally { Pop-Location }
+}
+
+function cmd-doctor {
+    banner
+    step 'Doctor 自检'
+
+    $failures = 0
+    $warnings = 0
+    $dockerOk = $false
+    $composeOk = $false
+    $containerRunning = $false
+    $mappedPort = $script:CPA_PORT
+
+    try {
+        $null = Get-Command docker -ErrorAction Stop
+        info 'Docker CLI 已安装'
+    } catch {
+        error-msg '未检测到 Docker CLI'
+        $failures++
+    }
+
+    try {
+        $null = docker info 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $dockerOk = $true
+            info 'Docker 守护进程运行中'
+        } else {
+            throw 'docker info failed'
+        }
+    } catch {
+        error-msg 'Docker 守护进程不可用'
+        detail '请启动 Docker Desktop 后重试'
+        $failures++
+    }
+
+    $script:COMPOSE_CMD = detect-compose
+    if ($script:COMPOSE_CMD) {
+        $composeOk = $true
+        info "Docker Compose 可用 ($script:COMPOSE_CMD)"
+    } else {
+        error-msg 'Docker Compose 不可用'
+        $failures++
+    }
+
+    if (Test-Path $script:CONFIG_FILE -PathType Container) {
+        error-msg 'config.yaml 当前是目录，不是文件'
+        detail '请删除空目录后重新运行部署'
+        $failures++
+    } elseif (Test-Path $script:CONFIG_FILE -PathType Leaf) {
+        $keyCount = @(Get-ConfigApiKeys).Count
+        if ($keyCount -gt 0) {
+            info "config.yaml 存在，API key 数量: $keyCount"
+        } else {
+            warn 'config.yaml 存在，但未读取到 api-keys'
+            $warnings++
+        }
+    } else {
+        error-msg 'config.yaml 不存在'
+        detail '请先运行: .\deploy.ps1'
+        $failures++
+    }
+
+    if ($composeOk -and (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        Push-Location $script:SCRIPT_DIR
+        try {
+            $env:CPA_PORT = $script:CPA_PORT
+            Invoke-Compose -f $script:COMPOSE_FILE config --quiet
+            if ($LASTEXITCODE -eq 0) {
+                info 'docker-compose.yml 配置有效'
+            } else {
+                error-msg 'docker-compose.yml 配置检查失败'
+                $failures++
+            }
+        } catch {
+            error-msg 'docker-compose.yml 配置检查失败'
+            $failures++
+        } finally {
+            Pop-Location
+        }
+    }
+
+    if ($dockerOk) {
+        $runningContainers = docker ps --format '{{.Names}}' 2>$null
+        if ($runningContainers -and ($runningContainers -match "^$script:CONTAINER_NAME$")) {
+            $containerRunning = $true
+            info "容器正在运行: $script:CONTAINER_NAME"
+            $portOutput = docker port $script:CONTAINER_NAME 8317/tcp 2>$null | Select-Object -First 1
+            if ($portOutput) {
+                $mappedPort = ($portOutput -split ':')[-1]
+                info "端口映射正常: 127.0.0.1:$mappedPort"
+            } else {
+                warn "未读取到容器端口映射，使用配置端口 $($script:CPA_PORT) 测试"
+                $warnings++
+            }
+        } else {
+            warn '容器未运行'
+            detail '可运行: .\deploy.ps1 start'
+            $warnings++
+        }
+
+        $volumeExists = $false
+        try { $null = docker volume inspect $script:AUTH_VOLUME 2>$null; if ($LASTEXITCODE -eq 0) { $volumeExists = $true } } catch { }
+        if ($volumeExists) {
+            $credCount = docker run --rm -v "$($script:AUTH_VOLUME):/auth:ro" alpine sh -c "find /auth -maxdepth 1 -type f 2>/dev/null | grep -Ev '/(config|logs)$' | wc -l" 2>$null
+            $credCount = if ($credCount) { [int]($credCount.ToString().Trim()) } else { 0 }
+            if ($credCount -gt 0) {
+                info "OAuth 凭证卷存在，凭证文件数: $credCount"
+            } else {
+                warn 'OAuth 凭证卷存在，但未找到 Provider 凭证'
+                detail '可运行: .\deploy.ps1 login'
+                $warnings++
+            }
+        } else {
+            warn 'OAuth 凭证卷不存在'
+            detail '完成 login 后会自动创建'
+            $warnings++
+        }
+    }
+
+    if ($containerRunning) {
+        Sync-ApiKeyFromConfig
+        if (-not $script:CPA_API_KEY) {
+            error-msg '无法读取 API key，跳过 /v1/models 测试'
+            $failures++
+        } else {
+            $httpCode = 0
+            $content = ''
+            try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$mappedPort/v1/models" `
+                    -Headers @{ Authorization = "Bearer $($script:CPA_API_KEY)" } `
+                    -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+                $httpCode = [int]$resp.StatusCode
+                $content = $resp.Content
+            } catch {
+                if ($_.Exception.Response) {
+                    $httpCode = [int]$_.Exception.Response.StatusCode
+                }
+            }
+
+            if ($httpCode -eq 200) {
+                if ($content -match '"id"\s*:') {
+                    info '/v1/models 返回 200，且模型列表非空'
+                } else {
+                    warn '/v1/models 返回 200，但模型列表可能为空'
+                    detail '通常表示 OAuth 登录未完成或凭证未加载'
+                    $warnings++
+                }
+            } elseif ($httpCode -eq 401) {
+                error-msg '/v1/models 认证失败 (401)'
+                detail '请检查 config.yaml 中的 API key'
+                $failures++
+            } elseif ($httpCode -eq 0) {
+                warn '/v1/models 无响应'
+                $warnings++
+            } else {
+                warn "/v1/models 返回异常状态: $httpCode"
+                $warnings++
+            }
+        }
+    }
+
+    Write-Host ''
+    divider
+    if ($failures -eq 0) {
+        info "Doctor 完成: $warnings 个警告，0 个错误"
+    } else {
+        error-msg "Doctor 完成: $warnings 个警告，$failures 个错误"
+        exit 1
+    }
+}
+
+function cmd-backup($requestedPath = '') {
+    $dest = Resolve-BackupPath $requestedPath
+
+    if ((Test-Path $dest -PathType Leaf) -and -not (confirm-prompt '备份文件已存在，是否覆盖？' 'n')) {
+        info '取消备份'
+        return
+    }
+
+    $parent = Split-Path $dest -Parent
+    if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+
+    $hasConfig = Test-Path $script:CONFIG_FILE -PathType Leaf
+    $hasAuth = $false
+    try {
+        $null = docker info 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $null = docker volume inspect $script:AUTH_VOLUME 2>$null
+            if ($LASTEXITCODE -eq 0) { $hasAuth = $true }
+        }
+    } catch { }
+
+    if (-not $hasConfig -and -not $hasAuth) {
+        error-msg '没有找到 config.yaml 或 OAuth 凭证卷，无法备份'
+        exit 1
+    }
+
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("antigravity-proxy-backup-{0}" -f [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    try {
+        if ($hasConfig) {
+            Copy-Item $script:CONFIG_FILE (Join-Path $tmpDir 'config.yaml') -Force
+        } else {
+            warn '未找到 config.yaml，本次仅备份凭证卷'
+        }
+
+        if ($hasAuth) {
+            $authDir = Join-Path $tmpDir 'auth'
+            New-Item -ItemType Directory -Path $authDir -Force | Out-Null
+            docker run --rm `
+                -v "$($script:AUTH_VOLUME):/auth:ro" `
+                -v "${authDir}:/backup-auth" `
+                alpine sh -c 'cp -a /auth/. /backup-auth/ 2>/dev/null || true' | Out-Null
+        } else {
+            warn '未找到 OAuth 凭证卷，本次仅备份 config.yaml'
+        }
+
+        tar -czf $dest -C $tmpDir .
+        if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
+    } finally {
+        Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    info "备份已创建: $dest"
+    detail '包含 config.yaml 和 OAuth 凭证卷（如存在）'
+}
+
+function cmd-restore($sourceFile = '') {
+    if (-not $sourceFile) {
+        error-msg '缺少备份文件'
+        detail '用法: .\deploy.ps1 restore backups\antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz'
+        exit 1
+    }
+    if (-not [System.IO.Path]::IsPathRooted($sourceFile)) {
+        $sourceFile = Join-Path $script:SCRIPT_DIR $sourceFile
+    }
+    if (-not (Test-Path $sourceFile -PathType Leaf)) {
+        error-msg "备份文件不存在: $sourceFile"
+        exit 1
+    }
+
+    warn '恢复会覆盖当前 config.yaml 和 OAuth 凭证卷'
+    if (-not (confirm-prompt '确认恢复？' 'n')) {
+        info '取消恢复'
+        return
+    }
+
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("antigravity-proxy-restore-{0}" -f [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    try {
+        tar -xzf $sourceFile -C $tmpDir
+        if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
+
+        $restoredConfig = Join-Path $tmpDir 'config.yaml'
+        $restoredAuth = Join-Path $tmpDir 'auth'
+        if (-not (Test-Path $restoredConfig -PathType Leaf) -and -not (Test-Path $restoredAuth -PathType Container)) {
+            error-msg '备份文件格式不正确'
+            exit 1
+        }
+
+        $runningContainers = docker ps --format '{{.Names}}' 2>$null
+        if ($runningContainers -and ($runningContainers -match "^$script:CONTAINER_NAME$")) {
+            if (confirm-prompt '服务正在运行，是否先停止再恢复？' 'y') {
+                docker stop $script:CONTAINER_NAME 2>$null | Out-Null
+                info '服务已停止'
+            } else {
+                warn '服务仍在运行，恢复后建议手动重启'
+            }
+        }
+
+        if (Test-Path $restoredConfig -PathType Leaf) {
+            if (Test-Path $script:CONFIG_FILE -PathType Container) {
+                $items = Get-ChildItem $script:CONFIG_FILE -ErrorAction SilentlyContinue
+                if ($items -and $items.Count -gt 0) {
+                    error-msg 'config.yaml 是非空目录，未覆盖'
+                    exit 1
+                }
+                Remove-Item $script:CONFIG_FILE -Force
+            }
+            Copy-Item $restoredConfig $script:CONFIG_FILE -Force
+            info 'config.yaml 已恢复'
+        }
+
+        if (Test-Path $restoredAuth -PathType Container) {
+            try { $null = docker info 2>$null; if ($LASTEXITCODE -ne 0) { throw 'docker info failed' } }
+            catch {
+                error-msg 'Docker 不可用，无法恢复 OAuth 凭证卷'
+                exit 1
+            }
+            docker volume create $script:AUTH_VOLUME | Out-Null
+            docker run --rm `
+                -v "$($script:AUTH_VOLUME):/auth" `
+                -v "${restoredAuth}:/restore-auth:ro" `
+                alpine sh -c 'rm -rf /auth/* /auth/.[!.]* /auth/..?* 2>/dev/null || true; cp -a /restore-auth/. /auth/ 2>/dev/null || true' | Out-Null
+            info 'OAuth 凭证卷已恢复'
+        }
+    } finally {
+        Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    info '恢复完成'
+    detail '可运行: .\deploy.ps1 start'
+}
+
+function cmd-check-update {
+    step '检查镜像更新'
+    detail $script:DOCKER_IMAGE
+
+    try { $null = Get-Command docker -ErrorAction Stop }
+    catch {
+        error-msg '未检测到 Docker CLI'
+        exit 1
+    }
+
+    $remoteDigest = Get-RemoteImageDigest
+    if (-not $remoteDigest) {
+        warn '无法获取远端镜像信息（网络或 registry 限制）'
+        exit 1
+    }
+
+    $localDigest = Get-LocalImageDigest
+    if (-not $localDigest) {
+        warn '本地尚未找到镜像，请运行 .\deploy.ps1 update'
+        detail "远端 digest: $remoteDigest"
+        return
+    }
+
+    if ($localDigest -eq $remoteDigest) {
+        info '当前镜像已是最新'
+        detail "digest: $localDigest"
+    } else {
+        warn '发现新镜像，可运行 .\deploy.ps1 update'
+        detail "本地: $localDigest"
+        detail "远端: $remoteDigest"
+    }
 }
 
 function cmd-update {
@@ -1007,6 +1488,10 @@ function show-help {
     Write-Host '    restart      重启服务' -ForegroundColor Cyan
     Write-Host '    status       查看服务状态' -ForegroundColor Cyan
     Write-Host '    logs         查看实时日志' -ForegroundColor Cyan
+    Write-Host '    doctor       自检 Docker/配置/凭证/API' -ForegroundColor Cyan
+    Write-Host '    backup [文件] 备份配置和 OAuth 凭证' -ForegroundColor Cyan
+    Write-Host '    restore <文件> 恢复配置和 OAuth 凭证' -ForegroundColor Cyan
+    Write-Host '    check-update  只检查镜像是否有更新' -ForegroundColor Cyan
     Write-Host '    update       更新到最新版本' -ForegroundColor Cyan
     Write-Host '    uninstall    完全卸载' -ForegroundColor Cyan
     Write-Host '    setup-claude 自动配置 Claude Code 环境' -ForegroundColor Cyan
@@ -1022,6 +1507,10 @@ function show-help {
     Write-Host ''
     Write-Host '    # 使用自定义端口' -ForegroundColor DarkGray
     Write-Host '    $env:CPA_PORT=9000; .\deploy.ps1 start'
+    Write-Host ''
+    Write-Host '    # 自检并备份' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 doctor'
+    Write-Host '    .\deploy.ps1 backup'
     Write-Host ''
 }
 
@@ -1060,6 +1549,16 @@ function main {
         'restart'   { cmd-restart @args }
         'status'    { cmd-status @args }
         'logs'      { cmd-logs @args }
+        'doctor'    { cmd-doctor }
+        'backup'    {
+            $backupPath = if ($args.Count -gt 1) { $args[1] } else { '' }
+            cmd-backup $backupPath
+        }
+        'restore'   {
+            $restorePath = if ($args.Count -gt 1) { $args[1] } else { '' }
+            cmd-restore $restorePath
+        }
+        'check-update' { cmd-check-update }
         'update'    { cmd-update @args }
         'uninstall' { cmd-uninstall @args }
         'setup-claude' { cmd-setup-claude }

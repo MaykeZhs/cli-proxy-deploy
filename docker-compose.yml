@@ -15,7 +15,6 @@ services:
       - type: bind
         source: ./config.yaml
         target: /CLIProxyAPI/config.yaml
-        read_only: true
         bind:
           create_host_path: false
       - cpa-auth:/root/.cli-proxy-api

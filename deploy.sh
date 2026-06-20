@@ -13,6 +13,10 @@
 #          bash deploy.sh stop     # 停止服务
 #          bash deploy.sh status   # 查看状态
 #          bash deploy.sh logs     # 实时日志
+#          bash deploy.sh doctor   # 自检诊断
+#          bash deploy.sh backup   # 备份配置和凭证
+#          bash deploy.sh restore <file> # 恢复配置和凭证
+#          bash deploy.sh check-update # 检查镜像更新
 #          bash deploy.sh update   # 更新到最新版
 #          bash deploy.sh uninstall # 完全卸载
 #          bash deploy.sh setup-claude # 配置 Claude Code
@@ -42,6 +46,7 @@ readonly COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 CPA_PORT="${CPA_PORT:-8317}"
 CPA_API_KEY="${CPA_API_KEY:-}"
 CPA_MANAGEMENT_KEY="${CPA_MANAGEMENT_KEY:-}"
+API_KEYS=()
 
 # ========================== 颜色 & 样式 ======================================
 
@@ -168,6 +173,98 @@ generate_key() {
     echo "sk-$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 32 || :)"
 }
 
+trim_value() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+yaml_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+parse_api_keys() {
+    local input="$1"
+    local default_key="$2"
+    local item key
+
+    API_KEYS=()
+    input="$(trim_value "$input")"
+
+    if [[ -n "$input" ]]; then
+        local old_ifs="$IFS"
+        IFS=','
+        for item in $input; do
+            key="$(trim_value "$item")"
+            [[ -n "$key" ]] && API_KEYS+=("$key")
+        done
+        IFS="$old_ifs"
+    fi
+
+    if [[ ${#API_KEYS[@]} -eq 0 ]]; then
+        API_KEYS=("$default_key")
+    fi
+
+    CPA_API_KEY="${API_KEYS[0]}"
+}
+
+read_config_api_keys() {
+    [[ -f "${CONFIG_FILE}" ]] || return 0
+    awk '
+        /^api-keys:[[:space:]]*$/ { in_keys=1; next }
+        in_keys && /^[^[:space:]]/ { exit }
+        in_keys && /^[[:space:]]*-[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            if (line ~ /^".*"$/) {
+                line=substr(line, 2, length(line) - 2)
+            }
+            if (line != "") {
+                print line
+            }
+        }
+    ' "${CONFIG_FILE}"
+}
+
+sync_api_key_from_config() {
+    if [[ -z "${CPA_API_KEY}" && -f "${CONFIG_FILE}" ]]; then
+        local first_key
+        first_key="$(read_config_api_keys | head -1 || true)"
+        CPA_API_KEY="${first_key:-}"
+    fi
+}
+
+config_api_key_count() {
+    read_config_api_keys | wc -l | tr -d '[:space:]'
+}
+
+resolve_backup_path() {
+    local requested="${1:-}"
+    if [[ -z "$requested" ]]; then
+        printf '%s/backups/antigravity-proxy-backup-%s.tgz' "${SCRIPT_DIR}" "$(date '+%Y%m%d-%H%M%S')"
+    elif [[ "$requested" = /* ]]; then
+        printf '%s' "$requested"
+    else
+        printf '%s/%s' "${SCRIPT_DIR}" "$requested"
+    fi
+}
+
+get_local_image_digest() {
+    docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "${DOCKER_IMAGE}" 2>/dev/null \
+        | awk -F@ 'NF > 1 { print $2; exit }'
+}
+
+get_remote_image_digest() {
+    docker manifest inspect --verbose "${DOCKER_IMAGE}" 2>/dev/null \
+        | awk -F'"' '/"digest"[[:space:]]*:/ { print $4; exit }'
+}
+
 ensure_config_file_slot() {
     if [[ ! -d "${CONFIG_FILE}" ]]; then
         return 0
@@ -215,10 +312,14 @@ config_wizard() {
     # API Key
     local default_key
     default_key="$(generate_key)"
-    ask "设置 API 密钥 (用于客户端认证)" "${default_key}"
+    ask "设置 API 密钥（多个用英文逗号分隔，回车=随机生成）" "${default_key}"
     read -r input_key
-    CPA_API_KEY="${input_key:-$default_key}"
-    info "API 密钥: ${CYAN}${CPA_API_KEY}${NC}"
+    parse_api_keys "${input_key}" "${default_key}"
+    if [[ ${#API_KEYS[@]} -eq 1 ]]; then
+        info "API 密钥: ${CYAN}${CPA_API_KEY}${NC}"
+    else
+        info "API 密钥: ${CYAN}共 ${#API_KEYS[@]} 个${NC}"
+    fi
 
     # Port
     ask "服务端口" "${CPA_PORT}"
@@ -248,6 +349,13 @@ config_wizard() {
     divider
 
     # Generate config.yaml
+    local api_keys_yaml=""
+    local api_key
+    for api_key in "${API_KEYS[@]}"; do
+        [[ -n "$api_keys_yaml" ]] && api_keys_yaml+=$'\n'
+        api_keys_yaml+="  - \"$(yaml_quote "$api_key")\""
+    done
+
     cat > "${CONFIG_FILE}" << YAML
 # =============================================================================
 #  Antigravity Proxy 配置文件
@@ -260,7 +368,7 @@ port: 8317
 auth-dir: "/root/.cli-proxy-api"
 
 api-keys:
-  - "${CPA_API_KEY}"
+${api_keys_yaml}
 
 debug: ${debug_mode}
 
@@ -322,6 +430,8 @@ do_login() {
             ;;
     esac
 
+    require_config_file
+
     # 检查已有凭证
     if docker volume inspect "${AUTH_VOLUME}" &>/dev/null 2>&1; then
         local auth_check
@@ -349,7 +459,7 @@ do_login() {
 
     if ! docker run --rm -it \
         -p "${oauth_port}:${oauth_port}" \
-        -v "${CONFIG_FILE}:/CLIProxyAPI/config.yaml:ro" \
+        -v "${CONFIG_FILE}:/CLIProxyAPI/config.yaml" \
         -v "${AUTH_VOLUME}:/root/.cli-proxy-api" \
         "${DOCKER_IMAGE}" \
         ./CLIProxyAPI \
@@ -438,6 +548,7 @@ start_service() {
     step "启动代理服务"
 
     require_config_file
+    sync_api_key_from_config
 
     cd "${SCRIPT_DIR}"
 
@@ -482,6 +593,10 @@ start_service() {
 # ========================== 显示最终信息 ======================================
 
 show_result() {
+    sync_api_key_from_config
+    local key_count
+    key_count="$(config_api_key_count)"
+
     echo ""
     echo -e "  ${GREEN}${BOLD}🎉 部署完成！${NC}"
     echo ""
@@ -489,7 +604,11 @@ show_result() {
     echo ""
     echo -e "  ${BOLD}服务信息${NC}"
     echo -e "  代理地址  ${GREEN}http://127.0.0.1:${CPA_PORT}${NC}"
-    echo -e "  API 密钥  ${GREEN}${CPA_API_KEY}${NC}"
+    if [[ "${key_count:-0}" -gt 1 ]]; then
+        echo -e "  API 密钥  ${GREEN}${CPA_API_KEY}${NC} ${DIM}(共 ${key_count} 个)${NC}"
+    else
+        echo -e "  API 密钥  ${GREEN}${CPA_API_KEY}${NC}"
+    fi
     if [[ -n "${CPA_MANAGEMENT_KEY}" ]]; then
         echo -e "  管理面板  ${GREEN}http://127.0.0.1:${CPA_PORT}/management.html${NC}"
         echo -e "  面板密码  ${GREEN}${CPA_MANAGEMENT_KEY}${NC}"
@@ -521,6 +640,9 @@ show_result() {
     echo -e "  ${CYAN}bash deploy.sh logs${NC}       查看实时日志"
     echo -e "  ${CYAN}bash deploy.sh restart${NC}    重启服务"
     echo -e "  ${CYAN}bash deploy.sh stop${NC}       停止服务"
+    echo -e "  ${CYAN}bash deploy.sh doctor${NC}     自检诊断"
+    echo -e "  ${CYAN}bash deploy.sh backup${NC}     备份配置和 OAuth 凭证"
+    echo -e "  ${CYAN}bash deploy.sh check-update${NC} 检查镜像更新"
     echo -e "  ${CYAN}bash deploy.sh update${NC}     更新到最新版本"
     echo -e "  ${CYAN}bash deploy.sh login${NC}      重新 OAuth 登录"
     echo -e "  ${CYAN}bash deploy.sh logout${NC}     退出 Provider 账号"
@@ -534,6 +656,26 @@ show_result() {
 cmd_deploy() {
     banner
     check_prereqs
+
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        step "检测到已有 config.yaml"
+        echo -e "  ${CYAN}1)${NC} 重新配置（覆盖现有 config 与全部 key）"
+        echo -e "  ${CYAN}2)${NC} 保留并仅启动"
+        echo ""
+        ask "选择" "2"
+        read -r config_choice
+        config_choice="${config_choice:-2}"
+
+        if [[ "${config_choice}" != "1" ]]; then
+            info "保留现有配置，仅启动服务"
+            start_service
+            show_result
+            return 0
+        fi
+
+        warn "将覆盖现有 config.yaml 与全部 API key"
+    fi
+
     config_wizard
     pull_image
 
@@ -568,6 +710,7 @@ cmd_login() {
     banner
     COMPOSE_CMD="$(detect_compose)"
     [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
+    require_config_file
 
     echo ""
     echo -e "  ${BOLD}选择要登录的 Provider${NC}"
@@ -658,9 +801,7 @@ cmd_start() {
     [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
 
     # 尝试从现有 config 读取 API key
-    if [[ -f "${CONFIG_FILE}" ]] && [[ -z "${CPA_API_KEY}" ]]; then
-        CPA_API_KEY=$(grep -A1 'api-keys:' "${CONFIG_FILE}" 2>/dev/null | tail -1 | sed 's/.*- *"\(.*\)"/\1/' || echo "")
-    fi
+    sync_api_key_from_config
 
     start_service
 
@@ -697,9 +838,7 @@ cmd_status() {
         echo ""
 
         # 尝试从现有 config 读取 API key 和 port
-        if [[ -f "${CONFIG_FILE}" ]] && [[ -z "${CPA_API_KEY}" ]]; then
-            CPA_API_KEY=$(grep -A1 'api-keys:' "${CONFIG_FILE}" 2>/dev/null | tail -1 | sed 's/.*- *"\(.*\)"/\1/' || echo "dummy")
-        fi
+        sync_api_key_from_config
 
         # 从容器端口映射获取实际端口
         local mapped_port
@@ -741,6 +880,322 @@ cmd_logs() {
     [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
     cd "${SCRIPT_DIR}"
     CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" logs -f --tail 100
+}
+
+cmd_doctor() {
+    banner
+    step "Doctor 自检"
+
+    local failures=0
+    local warnings=0
+    local docker_ok=false
+    local compose_ok=false
+    local container_running=false
+    local mapped_port="${CPA_PORT}"
+
+    if command -v docker &>/dev/null; then
+        info "Docker CLI 已安装"
+    else
+        error "未检测到 Docker CLI"
+        failures=$((failures + 1))
+    fi
+
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        docker_ok=true
+        info "Docker 守护进程运行中"
+    else
+        error "Docker 守护进程不可用"
+        detail "请启动 Docker Desktop 后重试"
+        failures=$((failures + 1))
+    fi
+
+    COMPOSE_CMD="$(detect_compose)"
+    if [[ -n "${COMPOSE_CMD}" ]]; then
+        compose_ok=true
+        info "Docker Compose 可用 (${COMPOSE_CMD})"
+    else
+        error "Docker Compose 不可用"
+        failures=$((failures + 1))
+    fi
+
+    if [[ -d "${CONFIG_FILE}" ]]; then
+        error "config.yaml 当前是目录，不是文件"
+        detail "请删除空目录后重新运行部署"
+        failures=$((failures + 1))
+    elif [[ -f "${CONFIG_FILE}" ]]; then
+        local key_count
+        key_count="$(config_api_key_count)"
+        if [[ "${key_count:-0}" -gt 0 ]]; then
+            info "config.yaml 存在，API key 数量: ${key_count}"
+        else
+            warn "config.yaml 存在，但未读取到 api-keys"
+            warnings=$((warnings + 1))
+        fi
+    else
+        error "config.yaml 不存在"
+        detail "请先运行: bash deploy.sh"
+        failures=$((failures + 1))
+    fi
+
+    if $compose_ok && [[ -f "${CONFIG_FILE}" ]]; then
+        if (cd "${SCRIPT_DIR}" && CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" config --quiet); then
+            info "docker-compose.yml 配置有效"
+        else
+            error "docker-compose.yml 配置检查失败"
+            failures=$((failures + 1))
+        fi
+    fi
+
+    if $docker_ok; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+            container_running=true
+            info "容器正在运行: ${CONTAINER_NAME}"
+            local port_output
+            port_output="$(docker port "${CONTAINER_NAME}" 8317/tcp 2>/dev/null | head -1 || true)"
+            if [[ -n "${port_output}" ]]; then
+                mapped_port="${port_output##*:}"
+                info "端口映射正常: 127.0.0.1:${mapped_port}"
+            else
+                warn "未读取到容器端口映射，使用配置端口 ${CPA_PORT} 测试"
+                warnings=$((warnings + 1))
+            fi
+        else
+            warn "容器未运行"
+            detail "可运行: bash deploy.sh start"
+            warnings=$((warnings + 1))
+
+            if command -v lsof &>/dev/null && lsof -i :"${CPA_PORT}" &>/dev/null 2>&1; then
+                warn "端口 ${CPA_PORT} 已被占用"
+                warnings=$((warnings + 1))
+            else
+                info "端口 ${CPA_PORT} 当前未被占用"
+            fi
+        fi
+
+        if docker volume inspect "${AUTH_VOLUME}" &>/dev/null 2>&1; then
+            local cred_count
+            cred_count="$(docker run --rm -v "${AUTH_VOLUME}:/auth:ro" alpine sh -c "find /auth -maxdepth 1 -type f 2>/dev/null | grep -Ev '/(config|logs)$' | wc -l" 2>/dev/null | tr -d '[:space:]' || echo "0")"
+            if [[ "${cred_count:-0}" -gt 0 ]]; then
+                info "OAuth 凭证卷存在，凭证文件数: ${cred_count}"
+            else
+                warn "OAuth 凭证卷存在，但未找到 Provider 凭证"
+                detail "可运行: bash deploy.sh login"
+                warnings=$((warnings + 1))
+            fi
+        else
+            warn "OAuth 凭证卷不存在"
+            detail "完成 login 后会自动创建"
+            warnings=$((warnings + 1))
+        fi
+    fi
+
+    if $container_running; then
+        sync_api_key_from_config
+        if [[ -z "${CPA_API_KEY}" ]]; then
+            error "无法读取 API key，跳过 /v1/models 测试"
+            failures=$((failures + 1))
+        else
+            local body_file http_code curl_exit
+            body_file="$(mktemp)"
+            set +e
+            http_code=$(curl -sS -o "${body_file}" -w "%{http_code}" \
+                "http://127.0.0.1:${mapped_port}/v1/models" \
+                -H "Authorization: Bearer ${CPA_API_KEY}" 2>/dev/null)
+            curl_exit=$?
+            set -e
+            if [[ ${curl_exit} -ne 0 ]]; then
+                http_code="000"
+            fi
+
+            if [[ "${http_code}" == "200" ]]; then
+                if grep -q '"id"[[:space:]]*:' "${body_file}"; then
+                    info "/v1/models 返回 200，且模型列表非空"
+                else
+                    warn "/v1/models 返回 200，但模型列表可能为空"
+                    detail "通常表示 OAuth 登录未完成或凭证未加载"
+                    warnings=$((warnings + 1))
+                fi
+            elif [[ "${http_code}" == "401" ]]; then
+                error "/v1/models 认证失败 (401)"
+                detail "请检查 config.yaml 中的 API key"
+                failures=$((failures + 1))
+            elif [[ "${http_code}" == "000" ]]; then
+                warn "/v1/models 无响应"
+                warnings=$((warnings + 1))
+            else
+                warn "/v1/models 返回异常状态: ${http_code}"
+                warnings=$((warnings + 1))
+            fi
+            rm -f "${body_file}"
+        fi
+    fi
+
+    echo ""
+    divider
+    if [[ "${failures}" -eq 0 ]]; then
+        info "Doctor 完成: ${warnings} 个警告，0 个错误"
+    else
+        error "Doctor 完成: ${warnings} 个警告，${failures} 个错误"
+        return 1
+    fi
+}
+
+cmd_backup() {
+    local dest
+    dest="$(resolve_backup_path "${1:-}")"
+
+    if [[ -e "${dest}" ]] && ! confirm "备份文件已存在，是否覆盖？" "n"; then
+        info "取消备份"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "${dest}")"
+
+    local has_config=false
+    local has_auth=false
+    [[ -f "${CONFIG_FILE}" ]] && has_config=true
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1 && docker volume inspect "${AUTH_VOLUME}" &>/dev/null 2>&1; then
+        has_auth=true
+    fi
+
+    if ! $has_config && ! $has_auth; then
+        error "没有找到 config.yaml 或 OAuth 凭证卷，无法备份"
+        return 1
+    fi
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+
+    if $has_config; then
+        cp "${CONFIG_FILE}" "${tmpdir}/config.yaml"
+    else
+        warn "未找到 config.yaml，本次仅备份凭证卷"
+    fi
+
+    if $has_auth; then
+        mkdir -p "${tmpdir}/auth"
+        docker run --rm \
+            -v "${AUTH_VOLUME}:/auth:ro" \
+            -v "${tmpdir}/auth:/backup-auth" \
+            alpine sh -c 'cp -a /auth/. /backup-auth/ 2>/dev/null || true' >/dev/null
+    else
+        warn "未找到 OAuth 凭证卷，本次仅备份 config.yaml"
+    fi
+
+    tar -czf "${dest}" -C "${tmpdir}" .
+    chmod 600 "${dest}" 2>/dev/null || true
+
+    rm -rf "${tmpdir}"
+
+    info "备份已创建: ${CYAN}${dest}${NC}"
+    detail "包含 config.yaml 和 OAuth 凭证卷（如存在）"
+}
+
+cmd_restore() {
+    local source_file="${1:-}"
+    if [[ -z "${source_file}" ]]; then
+        error "缺少备份文件"
+        detail "用法: bash deploy.sh restore backups/antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz"
+        return 1
+    fi
+    [[ "${source_file}" = /* ]] || source_file="${SCRIPT_DIR}/${source_file}"
+
+    if [[ ! -f "${source_file}" ]]; then
+        error "备份文件不存在: ${source_file}"
+        return 1
+    fi
+
+    warn "恢复会覆盖当前 config.yaml 和 OAuth 凭证卷"
+    if ! confirm "确认恢复？" "n"; then
+        info "取消恢复"
+        return 0
+    fi
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    tar -xzf "${source_file}" -C "${tmpdir}"
+
+    if [[ ! -f "${tmpdir}/config.yaml" && ! -d "${tmpdir}/auth" ]]; then
+        error "备份文件格式不正确"
+        rm -rf "${tmpdir}"
+        return 1
+    fi
+
+    if command -v docker &>/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+        if confirm "服务正在运行，是否先停止再恢复？" "y"; then
+            docker stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+            info "服务已停止"
+        else
+            warn "服务仍在运行，恢复后建议手动重启"
+        fi
+    fi
+
+    if [[ -f "${tmpdir}/config.yaml" ]]; then
+        if [[ -d "${CONFIG_FILE}" ]]; then
+            if find "${CONFIG_FILE}" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+                error "config.yaml 是非空目录，未覆盖"
+                rm -rf "${tmpdir}"
+                return 1
+            fi
+            rmdir "${CONFIG_FILE}"
+        fi
+        cp "${tmpdir}/config.yaml" "${CONFIG_FILE}"
+        chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+        info "config.yaml 已恢复"
+    fi
+
+    if [[ -d "${tmpdir}/auth" ]]; then
+        if ! command -v docker &>/dev/null || ! docker info &>/dev/null 2>&1; then
+            error "Docker 不可用，无法恢复 OAuth 凭证卷"
+            rm -rf "${tmpdir}"
+            return 1
+        fi
+        docker volume create "${AUTH_VOLUME}" >/dev/null
+        docker run --rm \
+            -v "${AUTH_VOLUME}:/auth" \
+            -v "${tmpdir}/auth:/restore-auth:ro" \
+            alpine sh -c 'rm -rf /auth/* /auth/.[!.]* /auth/..?* 2>/dev/null || true; cp -a /restore-auth/. /auth/ 2>/dev/null || true' >/dev/null
+        info "OAuth 凭证卷已恢复"
+    fi
+
+    rm -rf "${tmpdir}"
+
+    info "恢复完成"
+    detail "可运行: bash deploy.sh start"
+}
+
+cmd_check_update() {
+    step "检查镜像更新"
+    detail "${DOCKER_IMAGE}"
+
+    if ! command -v docker &>/dev/null; then
+        error "未检测到 Docker CLI"
+        return 1
+    fi
+
+    local remote_digest
+    remote_digest="$(get_remote_image_digest || true)"
+    if [[ -z "${remote_digest}" ]]; then
+        warn "无法获取远端镜像信息（网络或 registry 限制）"
+        return 1
+    fi
+
+    local local_digest
+    local_digest="$(get_local_image_digest || true)"
+    if [[ -z "${local_digest}" ]]; then
+        warn "本地尚未找到镜像，请运行 ${CYAN}bash deploy.sh update${NC}"
+        detail "远端 digest: ${remote_digest}"
+        return 0
+    fi
+
+    if [[ "${local_digest}" == "${remote_digest}" ]]; then
+        info "当前镜像已是最新"
+        detail "digest: ${local_digest}"
+    else
+        warn "发现新镜像，可运行 ${CYAN}bash deploy.sh update${NC}"
+        detail "本地: ${local_digest}"
+        detail "远端: ${remote_digest}"
+    fi
 }
 
 cmd_update() {
@@ -879,6 +1334,10 @@ show_help() {
     echo -e "    ${CYAN}restart${NC}      重启服务"
     echo -e "    ${CYAN}status${NC}       查看服务状态"
     echo -e "    ${CYAN}logs${NC}         查看实时日志"
+    echo -e "    ${CYAN}doctor${NC}       自检 Docker/配置/凭证/API"
+    echo -e "    ${CYAN}backup [文件]${NC} 备份配置和 OAuth 凭证"
+    echo -e "    ${CYAN}restore <文件>${NC} 恢复配置和 OAuth 凭证"
+    echo -e "    ${CYAN}check-update${NC}  只检查镜像是否有更新"
     echo -e "    ${CYAN}update${NC}       更新到最新版本"
     echo -e "    ${CYAN}uninstall${NC}    完全卸载"
     echo -e "    ${CYAN}setup-claude${NC} 自动配置 Claude Code 环境"
@@ -894,6 +1353,10 @@ show_help() {
     echo ""
     echo -e "    ${DIM}# 使用自定义端口${NC}"
     echo -e "    CPA_PORT=9000 bash deploy.sh start"
+    echo ""
+    echo -e "    ${DIM}# 自检并备份${NC}"
+    echo -e "    bash deploy.sh doctor"
+    echo -e "    bash deploy.sh backup"
     echo ""
     echo -e "    ${DIM}# 远程一键安装${NC}"
     echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash"
@@ -927,6 +1390,10 @@ main() {
         restart)    cmd_restart ;;
         status)     cmd_status ;;
         logs)       cmd_logs ;;
+        doctor)     cmd_doctor ;;
+        backup)     shift; cmd_backup "${1:-}" ;;
+        restore)    shift; cmd_restore "${1:-}" ;;
+        check-update) cmd_check_update ;;
         update)     cmd_update ;;
         uninstall)  cmd_uninstall ;;
         setup-claude) cmd_setup_claude ;;

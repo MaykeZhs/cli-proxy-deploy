@@ -12,9 +12,10 @@ port: 8317
 # 凭证目录（Docker 容器内路径）
 auth-dir: "/root/.cli-proxy-api"
 
-# API 密钥 —— 客户端连接时的认证令牌，请修改为你自己的密钥
+# API 密钥 —— 客户端连接时的认证令牌，可配置多个
 api-keys:
   - "your-api-key-here"
+  # - "another-api-key-here"
 
 # 调试日志（部署稳定后建议关闭）
 debug: false

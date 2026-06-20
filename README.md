@@ -26,6 +26,8 @@
 | 🎯 Claude Code for VS Code 适配 / VS Code ready | 开箱即用的环境变量配置 / Ready-to-use env config |
 | 📊 管理面板 / Management panel | 内置 Web UI 监控 / Built-in Web UI monitoring |
 | 🔁 完整生命周期管理 / Full lifecycle | start / stop / restart / update / uninstall |
+| 🩺 一键自检 / One-command doctor | 检查 Docker、配置、凭证和 `/v1/models` / Check Docker, config, credentials, and `/v1/models` |
+| 💾 备份恢复 / Backup & restore | 备份 `config.yaml` 和 OAuth 凭证卷 / Back up `config.yaml` and OAuth credential volume |
 | 🪟 Windows 原生支持 / Windows native | PowerShell 部署脚本 / PowerShell deploy scripts |
 
 ---
@@ -91,7 +93,7 @@ cd antigravity-proxy
 
 > **提示 / Tip:** 部署完成后运行 `bash deploy.sh setup-claude` / `.\deploy.ps1 setup-claude` 可一键写入 Claude Code CLI 配置。
 
-> **首次部署 vs 日常管理：** `bash deploy.sh` / `.\deploy.ps1`（不带参数）会重新运行配置向导并生成新的 `config.yaml`。部署完成后，日常请使用 `start` / `stop` / `restart` / `login` / `logout` 等子命令，避免覆盖已有配置。
+> **首次部署 vs 日常管理：** 如果已有 `config.yaml`，`bash deploy.sh` / `.\deploy.ps1`（不带参数）会先询问"重新配置"或"保留并仅启动"，默认保留现有配置和全部 API key。
 
 ---
 
@@ -145,20 +147,21 @@ The deployment script will guide you through:
 
 > **Tip:** After deployment, run `bash deploy.sh setup-claude` / `.\deploy.ps1 setup-claude` to auto-configure Claude Code CLI.
 
-> **First deploy vs daily use:** Running without arguments re-runs the config wizard and generates a new `config.yaml`. After initial deployment, use subcommands like `start` / `stop` / `restart` / `login` / `logout` to avoid overwriting your existing config.
+> **First deploy vs daily use:** If `config.yaml` already exists, running without arguments asks whether to reconfigure or preserve and start. The default is to preserve your existing config and all API keys.
 
 ---
 
 ## ✅ 验证部署 / Verify Deployment
 
-启动后先检查容器、配置挂载、凭证和模型列表：
+启动后先运行 `doctor`。它会检查 Docker、容器、`config.yaml`、端口、OAuth 凭证，以及 `/v1/models` 是否返回非空模型列表。
 
-After startup, verify the container, config mount, credential, and model list:
+After startup, run `doctor` first. It checks Docker, the container, `config.yaml`, port mapping, OAuth credentials, and whether `/v1/models` returns a non-empty model list.
 
 **Linux / macOS:**
 
 ```bash
 cd antigravity-proxy
+bash deploy.sh doctor
 
 # Service status and loaded credentials
 bash deploy.sh status
@@ -171,7 +174,7 @@ docker compose -f docker-compose.yml exec -T cliproxyapi sh -lc \
 'test -f /CLIProxyAPI/config.yaml && ls -l /CLIProxyAPI/config.yaml'
 
 # API model list
-API_KEY=$(awk -F'"' '/- "sk-/{print $2; exit}' config.yaml)
+API_KEY=$(awk -F'"' '/^[[:space:]]*-[[:space:]]*"/{print $2; exit}' config.yaml)
 curl -i http://127.0.0.1:8317/v1/models \
   -H "Authorization: Bearer ${API_KEY}"
 ```
@@ -180,6 +183,7 @@ curl -i http://127.0.0.1:8317/v1/models \
 
 ```powershell
 cd antigravity-proxy
+.\deploy.ps1 doctor
 
 # Service status and loaded credentials
 .\deploy.ps1 status
@@ -191,7 +195,7 @@ docker compose -f docker-compose.yml ps
 docker compose -f docker-compose.yml exec -T cliproxyapi sh -lc "test -f /CLIProxyAPI/config.yaml && ls -l /CLIProxyAPI/config.yaml"
 
 # API model list
-$apiKey = (Select-String -Path config.yaml -Pattern '- "sk-([^"]+)"').Matches.Groups[1].Value
+$apiKey = (Select-String -Path config.yaml -Pattern '^\s*-\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
 Invoke-WebRequest -Uri "http://127.0.0.1:8317/v1/models" `
   -Headers @{ Authorization = "Bearer $apiKey" }
 ```
@@ -227,14 +231,14 @@ After deployment, you need two values:
 **Linux / macOS:**
 
 ```bash
-API_KEY=$(awk -F'"' '/- "sk-/{print $2; exit}' config.yaml)
+API_KEY=$(awk -F'"' '/^[[:space:]]*-[[:space:]]*"/{print $2; exit}' config.yaml)
 echo "$API_KEY"
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$apiKey = (Select-String -Path config.yaml -Pattern '- "sk-([^"]+)"').Matches.Groups[1].Value
+$apiKey = (Select-String -Path config.yaml -Pattern '^\s*-\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
 $apiKey
 ```
 
@@ -407,6 +411,10 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 重启服务 / Restart service | `bash deploy.sh restart` | `.\deploy.ps1 restart` |
 | 查看状态 / Check status | `bash deploy.sh status` | `.\deploy.ps1 status` |
 | 实时日志 / Real-time logs | `bash deploy.sh logs` | `.\deploy.ps1 logs` |
+| 一键自检 / Doctor check | `bash deploy.sh doctor` | `.\deploy.ps1 doctor` |
+| 备份配置和凭证 / Backup config and credentials | `bash deploy.sh backup` | `.\deploy.ps1 backup` |
+| 恢复配置和凭证 / Restore config and credentials | `bash deploy.sh restore <file>` | `.\deploy.ps1 restore <file>` |
+| 检查镜像更新 / Check image update | `bash deploy.sh check-update` | `.\deploy.ps1 check-update` |
 | 更新到最新版 / Update to latest | `bash deploy.sh update` | `.\deploy.ps1 update` |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
@@ -414,13 +422,16 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 
 ### 更新 Docker 镜像 / Update Docker Image
 
-`update` 命令会拉取 `eceasy/cli-proxy-api:latest` 最新镜像，并用 Docker Compose 重新创建/更新服务。
+先用 `check-update` 只检查远端镜像 digest，不下载镜像层；确认有新版本后再运行 `update`。
 
-Use the `update` command when you want to upgrade the running proxy to the latest `eceasy/cli-proxy-api:latest` Docker image. It pulls the newest image and recreates the service with Docker Compose while keeping your `config.yaml` and OAuth credential volume.
+Use `check-update` to compare the remote image digest without downloading image layers. Run `update` only when a newer image is available.
 
 **Linux / macOS:**
 
 ```bash
+# Check metadata only; no image layers are downloaded
+bash deploy.sh check-update
+
 # Pull the latest image and recreate the service
 bash deploy.sh update
 
@@ -431,12 +442,52 @@ bash deploy.sh status
 **Windows (PowerShell):**
 
 ```powershell
+# Check metadata only; no image layers are downloaded
+.\deploy.ps1 check-update
+
 # Pull the latest image and recreate the service
 .\deploy.ps1 update
 
 # Verify the updated service is running
 .\deploy.ps1 status
 ```
+
+### 自检、备份和恢复 / Doctor, Backup, and Restore
+
+`doctor` 适合排错前先跑：它会告诉你 Docker、Compose、配置文件、容器、端口、OAuth 凭证和 `/v1/models` 哪一步有问题。
+
+Run `doctor` before manual troubleshooting. It shows which layer is broken: Docker, Compose, config file, container, port, OAuth credentials, or `/v1/models`.
+
+```bash
+bash deploy.sh doctor
+```
+
+```powershell
+.\deploy.ps1 doctor
+```
+
+`backup` 默认写入 `backups/antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz`，包含 `config.yaml` 和 Docker volume `antigravity-proxy-auth` 中的 OAuth 凭证（如果存在）。`backups/` 已被 `.gitignore` 忽略。
+
+`backup` writes to `backups/antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz` by default. It includes `config.yaml` and OAuth credentials from the Docker volume `antigravity-proxy-auth` when present. `backups/` is ignored by Git.
+
+```bash
+bash deploy.sh backup
+bash deploy.sh backup backups/before-upgrade.tgz
+bash deploy.sh restore backups/before-upgrade.tgz
+```
+
+```powershell
+.\deploy.ps1 backup
+.\deploy.ps1 backup backups\before-upgrade.tgz
+.\deploy.ps1 restore backups\before-upgrade.tgz
+```
+
+Recommended times to back up:
+
+- Before `uninstall`
+- Before moving to a new machine
+- Before testing a risky config change
+- Before updating the Docker image
 
 ### 环境变量 / Environment Variables
 
@@ -547,6 +598,18 @@ antigravity-proxy/
 ---
 
 ## 🧯 常见问题 / Troubleshooting
+
+First run:
+
+```bash
+bash deploy.sh doctor
+```
+
+```powershell
+.\deploy.ps1 doctor
+```
+
+This usually points to the exact broken layer before you inspect logs manually.
 
 <details>
 <summary><b>Codex OAuth authentication fails</b></summary>
@@ -744,7 +807,7 @@ $env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
 ## 🔒 安全 / Security
 
 - `config.yaml` 和 `.env` 包含本地密钥，已被 `.gitignore` 忽略。
-- OAuth 凭证保存在 Docker volume `antigravity-proxy-auth` 中，不要上传或备份到公开仓库。
+- OAuth 凭证保存在 Docker volume `antigravity-proxy-auth` 中；`backup` 生成的归档也包含敏感信息，不要上传到公开仓库。
 - 发布截图、日志、README 示例时，不要包含真实 API key、OAuth 邮箱或凭证文件名。
 
 See [SECURITY.md](SECURITY.md) for the full checklist.
