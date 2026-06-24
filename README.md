@@ -459,6 +459,9 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 恢复配置和凭证 / Restore config and credentials | `bash deploy.sh restore <file>` | `.\deploy.ps1 restore <file>` |
 | 检查镜像更新 / Check image update | `bash deploy.sh check-update` | `.\deploy.ps1 check-update` |
 | 更新到最新版 / Update to latest | `bash deploy.sh update` | `.\deploy.ps1 update` |
+| 有新镜像时才更新 / Update only if needed | `bash deploy.sh auto-update` | — |
+| 启用自动更新 / Enable auto-update | `bash deploy.sh enable-auto-update` | — |
+| 禁用自动更新 / Disable auto-update | `bash deploy.sh disable-auto-update` | — |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
 | 显示帮助 / Show help | `bash deploy.sh help` | `.\deploy.ps1 help` |
@@ -478,9 +481,25 @@ bash deploy.sh check-update
 # Pull the latest image and recreate the service
 bash deploy.sh update
 
+# Cron-safe update: only pulls and recreates when the remote image digest changed
+bash deploy.sh auto-update
+
+# Enable daily auto-update at 04:20 and write logs to logs/auto-update.log
+bash deploy.sh enable-auto-update
+
+# Use a custom cron schedule
+bash deploy.sh enable-auto-update "20 4 * * *"
+
+# Disable the managed auto-update cron entry
+bash deploy.sh disable-auto-update
+
 # Verify the updated service is running
 bash deploy.sh status
 ```
+
+`auto-update` is designed for cron. It compares the local and remote Docker image digest first. If they match, it exits without pulling, recreating, or restarting the container. `enable-auto-update` writes a marked crontab block so running it again safely replaces the previous schedule without touching your other cron jobs.
+
+The scheduling commands, `enable-auto-update` and `disable-auto-update`, are Linux/macOS only because they use `crontab`.
 
 **Windows (PowerShell):**
 

@@ -18,6 +18,9 @@
 #          bash deploy.sh restore <file> # 恢复配置和凭证
 #          bash deploy.sh check-update # 检查镜像更新
 #          bash deploy.sh update   # 更新到最新版
+#          bash deploy.sh auto-update # 有新镜像时才更新（适合 cron）
+#          bash deploy.sh enable-auto-update [cron] # 启用每日自动更新
+#          bash deploy.sh disable-auto-update # 禁用自动更新
 #          bash deploy.sh uninstall # 完全卸载
 #          bash deploy.sh setup-claude # 配置 Claude Code
 #
@@ -41,6 +44,9 @@ readonly AUTH_VOLUME="antigravity-proxy-auth"
 readonly OAUTH_PORT=51121
 readonly CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
+readonly AUTO_UPDATE_LOG="${SCRIPT_DIR}/logs/auto-update.log"
+readonly AUTO_UPDATE_MARKER_BEGIN="# >>> antigravity-proxy auto-update >>>"
+readonly AUTO_UPDATE_MARKER_END="# <<< antigravity-proxy auto-update <<<"
 
 # 用户可配置（在 .env 中覆盖）
 CPA_PORT="${CPA_PORT:-8317}"
@@ -263,6 +269,10 @@ get_local_image_digest() {
 get_remote_image_digest() {
     docker manifest inspect --verbose "${DOCKER_IMAGE}" 2>/dev/null \
         | awk -F'"' '/"digest"[[:space:]]*:/ { print $4; exit }'
+}
+
+shell_quote() {
+    printf '%q' "$1"
 }
 
 ensure_config_file_slot() {
@@ -1210,6 +1220,122 @@ cmd_update() {
     info "已更新到最新版本"
 }
 
+cmd_auto_update() {
+    COMPOSE_CMD="$(detect_compose)"
+    [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
+    require_config_file
+
+    step "自动更新检查"
+    detail "${DOCKER_IMAGE}"
+    detail "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+
+    if ! command -v docker &>/dev/null; then
+        error "未检测到 Docker CLI"
+        return 1
+    fi
+
+    local remote_digest
+    remote_digest="$(get_remote_image_digest || true)"
+    if [[ -z "${remote_digest}" ]]; then
+        warn "无法获取远端镜像信息（网络或 registry 限制）"
+        return 1
+    fi
+
+    local local_digest
+    local_digest="$(get_local_image_digest || true)"
+    if [[ -n "${local_digest}" && "${local_digest}" == "${remote_digest}" ]]; then
+        info "当前镜像已是最新，跳过更新"
+        detail "digest: ${local_digest}"
+        return 0
+    fi
+
+    if [[ -z "${local_digest}" ]]; then
+        warn "本地尚未找到镜像，将拉取最新镜像"
+    else
+        warn "发现新镜像，开始更新"
+        detail "本地: ${local_digest}"
+        detail "远端: ${remote_digest}"
+    fi
+
+    cd "${SCRIPT_DIR}"
+    docker pull "${DOCKER_IMAGE}" 2>&1 | tail -1
+    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d 2>&1 | tail -1
+
+    local updated_digest
+    updated_digest="$(get_local_image_digest || true)"
+    if [[ -n "${updated_digest}" ]]; then
+        info "自动更新完成"
+        detail "当前 digest: ${updated_digest}"
+    else
+        warn "自动更新命令已完成，但未读取到本地镜像 digest"
+    fi
+}
+
+current_crontab_without_auto_update() {
+    crontab -l 2>/dev/null | awk \
+        -v begin="${AUTO_UPDATE_MARKER_BEGIN}" \
+        -v end="${AUTO_UPDATE_MARKER_END}" '
+            $0 == begin { skip = 1; next }
+            $0 == end { skip = 0; next }
+            !skip { print }
+        ' || true
+}
+
+cmd_enable_auto_update() {
+    local schedule="${1:-20 4 * * *}"
+
+    if ! command -v crontab &>/dev/null; then
+        error "未检测到 crontab"
+        detail "请先安装 cron/cronie 后重试"
+        return 1
+    fi
+
+    if ! [[ "${schedule}" =~ ^[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+$ ]]; then
+        error "cron 表达式格式不正确"
+        detail "示例: bash deploy.sh enable-auto-update \"20 4 * * *\""
+        return 1
+    fi
+
+    require_config_file
+    mkdir -p "$(dirname "${AUTO_UPDATE_LOG}")"
+
+    local quoted_script_dir quoted_log cron_line
+    quoted_script_dir="$(shell_quote "${SCRIPT_DIR}")"
+    quoted_log="$(shell_quote "${AUTO_UPDATE_LOG}")"
+    cron_line="${schedule} cd ${quoted_script_dir} && bash deploy.sh auto-update >> ${quoted_log} 2>&1"
+
+    local existing
+    existing="$(current_crontab_without_auto_update)"
+
+    {
+        [[ -n "${existing}" ]] && printf '%s\n' "${existing}"
+        printf '%s\n' "${AUTO_UPDATE_MARKER_BEGIN}"
+        printf '%s\n' "${cron_line}"
+        printf '%s\n' "${AUTO_UPDATE_MARKER_END}"
+    } | crontab -
+
+    info "已启用自动更新"
+    detail "计划: ${schedule}"
+    detail "日志: ${AUTO_UPDATE_LOG}"
+    detail "命令: bash deploy.sh auto-update"
+}
+
+cmd_disable_auto_update() {
+    if ! command -v crontab &>/dev/null; then
+        error "未检测到 crontab"
+        return 1
+    fi
+
+    local existing
+    existing="$(current_crontab_without_auto_update)"
+
+    {
+        [[ -n "${existing}" ]] && printf '%s\n' "${existing}"
+    } | crontab -
+
+    info "已禁用自动更新"
+}
+
 cmd_uninstall() {
     COMPOSE_CMD="$(detect_compose)"
     [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
@@ -1339,6 +1465,9 @@ show_help() {
     echo -e "    ${CYAN}restore <文件>${NC} 恢复配置和 OAuth 凭证"
     echo -e "    ${CYAN}check-update${NC}  只检查镜像是否有更新"
     echo -e "    ${CYAN}update${NC}       更新到最新版本"
+    echo -e "    ${CYAN}auto-update${NC}  有新镜像时才更新（适合 cron）"
+    echo -e "    ${CYAN}enable-auto-update [cron]${NC} 启用自动更新"
+    echo -e "    ${CYAN}disable-auto-update${NC} 禁用自动更新"
     echo -e "    ${CYAN}uninstall${NC}    完全卸载"
     echo -e "    ${CYAN}setup-claude${NC} 自动配置 Claude Code 环境"
     echo -e "    ${CYAN}help${NC}         显示此帮助"
@@ -1357,6 +1486,10 @@ show_help() {
     echo -e "    ${DIM}# 自检并备份${NC}"
     echo -e "    bash deploy.sh doctor"
     echo -e "    bash deploy.sh backup"
+    echo ""
+    echo -e "    ${DIM}# 启用每日自动更新（默认 04:20）${NC}"
+    echo -e "    bash deploy.sh enable-auto-update"
+    echo -e "    bash deploy.sh enable-auto-update \"20 4 * * *\""
     echo ""
     echo -e "    ${DIM}# 远程一键安装${NC}"
     echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash"
@@ -1395,6 +1528,9 @@ main() {
         restore)    shift; cmd_restore "${1:-}" ;;
         check-update) cmd_check_update ;;
         update)     cmd_update ;;
+        auto-update) cmd_auto_update ;;
+        enable-auto-update) shift; cmd_enable_auto_update "$*" ;;
+        disable-auto-update) cmd_disable_auto_update ;;
         uninstall)  cmd_uninstall ;;
         setup-claude) cmd_setup_claude ;;
         help|--help|-h) show_help ;;
