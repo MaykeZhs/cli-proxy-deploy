@@ -40,6 +40,10 @@
 | **Linux / macOS** | Bash (built-in) |
 | **Windows** | [PowerShell 7+](https://learn.microsoft.com/powershell/scripting/install/installing-powershell) (`pwsh`) |
 
+> **开始前 / Before you start:** 请先启动 Docker Desktop，并确认 `docker version` 和 `docker compose version` 都能正常运行。Windows 用户请使用 PowerShell 7 (`pwsh`)，不要使用旧版 Windows PowerShell 5.1。
+>
+> Start Docker Desktop first and confirm that both `docker version` and `docker compose version` work. On Windows, use PowerShell 7 (`pwsh`), not the older Windows PowerShell 5.1.
+
 ---
 
 ## 🚀 快速开始
@@ -52,12 +56,14 @@
 **Linux / macOS:**
 
 ```bash
+# Download the installer and run it with Bash
 curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
+# Download the installer to the current folder, then run it
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
@@ -68,16 +74,26 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-pr
 **Linux / macOS:**
 
 ```bash
+# Download the project
 git clone https://github.com/MaykeZhs/antigravity-proxy.git
+
+# Enter the project folder
 cd antigravity-proxy
+
+# Start the interactive deployment
 bash deploy.sh
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
+# Download the project
 git clone https://github.com/MaykeZhs/antigravity-proxy.git
+
+# Enter the project folder
 cd antigravity-proxy
+
+# Start the interactive deployment
 .\deploy.ps1
 ```
 
@@ -106,12 +122,14 @@ Installs to `~/.antigravity-proxy` (Windows: `%USERPROFILE%\.antigravity-proxy`)
 **Linux / macOS:**
 
 ```bash
+# Download the installer and run it with Bash
 curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
+# Download the installer to the current folder, then run it
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
@@ -122,16 +140,26 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-pr
 **Linux / macOS:**
 
 ```bash
+# Download the project
 git clone https://github.com/MaykeZhs/antigravity-proxy.git
+
+# Enter the project folder
 cd antigravity-proxy
+
+# Start the interactive deployment
 bash deploy.sh
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
+# Download the project
 git clone https://github.com/MaykeZhs/antigravity-proxy.git
+
+# Enter the project folder
 cd antigravity-proxy
+
+# Start the interactive deployment
 .\deploy.ps1
 ```
 
@@ -226,19 +254,32 @@ After deployment, you need two values:
 | Base URL | `http://127.0.0.1:8317` | CLIProxyAPI endpoint |
 | API Key | `config.yaml` 里的 `api-keys` | Client authentication token |
 
+> **示例中的占位符 / Placeholders in examples**
+>
+> - 将 `your-api-key` 替换为 `config.yaml` 中的真实 API Key。Replace `your-api-key` with the real API key from `config.yaml`.
+> - 将 `user@your-server` 替换为远程服务器的 SSH 用户名和地址。Replace `user@your-server` with your remote server's SSH user and address.
+> - 模型名称只是示例；请优先使用 `/v1/models` 返回的模型 `id`。Model names are examples; prefer an exact model `id` returned by `/v1/models`.
+> - Linux/macOS 示例使用 `${API_KEY}`；PowerShell 示例使用 `$apiKey`。These variable names are platform-specific.
+
 ### 1. 获取 API Key / Get the API Key
 
 **Linux / macOS:**
 
 ```bash
+# Read the first API key from config.yaml and save it in this shell
 API_KEY=$(awk -F'"' '/^[[:space:]]*-[[:space:]]*"/{print $2; exit}' config.yaml)
+
+# Print the value so you can confirm it was loaded
 echo "$API_KEY"
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
+# Read the first API key from config.yaml and save it in this PowerShell session
 $apiKey = (Select-String -Path config.yaml -Pattern '^\s*-\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+
+# Print the value so you can confirm it was loaded
 $apiKey
 ```
 
@@ -325,6 +366,8 @@ $env:OPENAI_API_KEY = $apiKey
 For security, keep the proxy bound to localhost and use SSH port forwarding from your local machine:
 
 ```bash
+# Run this on your local computer and keep the terminal open
+# Local port 8317 will forward to port 8317 on the remote server
 ssh -L 8317:127.0.0.1:8317 user@your-server -p 22
 ```
 
@@ -728,24 +771,43 @@ This is expected. The one-off login container runs inside Docker, so it prints a
 The deploy script auto-generates `config.yaml`. You can also manually edit based on `config.example.yaml`:
 
 ```yaml
+# Empty means the app uses its default bind address inside the container
 host: ""
+
+# Internal service port; normally keep this value unchanged
 port: 8317
+
+# OAuth credential folder inside the container
 auth-dir: "/root/.cli-proxy-api"
+
+# Keys that clients must send in the Authorization header
 api-keys:
   - "your-custom-key"
+
+# Enable only when you need detailed troubleshooting logs
 debug: false
+
+# Retry temporary upstream request failures up to three times
 request-retry: 3
 max-retry-interval: 30
+
+# Decide when the proxy may switch account/project or model
 quota-exceeded:
   switch-project: true
   switch-preview-model: true
   antigravity-credits: true
+
+# Share requests across multiple logged-in accounts
 routing:
   strategy: "round-robin"
+
+# Keep long streaming responses alive
 streaming:
   keepalive-seconds: 15
   bootstrap-retries: 1
 nonstream-keepalive-interval: 30
+
+# Management panel settings
 remote-management:
   allow-remote: false
   secret-key: "your-panel-password"

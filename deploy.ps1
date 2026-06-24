@@ -1570,4 +1570,8 @@ function main {
     }
 }
 
-main @args
+# Only run when executed as a script. When dot-sourced, load functions without
+# starting the interactive deploy flow so syntax checks can safely import this file.
+if ($MyInvocation.InvocationName -ne '.') {
+    main @args
+}
