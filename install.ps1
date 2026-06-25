@@ -1,25 +1,25 @@
 #!/usr/bin/env pwsh
 # =============================================================================
-#  Antigravity Proxy — Remote One-Click Installer (Windows)
+#  CLI Proxy Manager — Remote One-Click Installer (Windows)
 #  远程一键安装脚本 (Windows)
 #
 #  Usage / 用法:
-#    Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 | Invoke-Expression
-#    $env:REPO_URL='https://github.com/MaykeZhs/antigravity-proxy'; .\install.ps1
+#    Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.ps1 | Invoke-Expression
+#    $env:REPO_URL='https://github.com/MaykeZhs/cli-proxy-manager'; .\install.ps1
 # =============================================================================
 
 $ErrorActionPreference = 'Stop'
 
-$REPO_URL    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/MaykeZhs/antigravity-proxy' }
-$INSTALL_DIR = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:USERPROFILE '.antigravity-proxy' }
+$REPO_URL    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/MaykeZhs/cli-proxy-manager' }
+$INSTALL_DIR = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:USERPROFILE '.cli-proxy-manager' }
 $BRANCH      = if ($env:BRANCH)      { $env:BRANCH }      else { 'main' }
 
 function info($msg)  { Write-Host "  ✔  $msg" -ForegroundColor Green }
 function error-msg($msg) { Write-Host "  ✘  $msg" -ForegroundColor Red }
 
 Write-Host ''
-Write-Host '  Antigravity Proxy — Installer' -ForegroundColor Cyan
-Write-Host '  One-click CLIProxyAPI deployment for Antigravity' -ForegroundColor DarkGray
+Write-Host '  CLI Proxy Manager — Installer' -ForegroundColor Cyan
+Write-Host '  One-click CLIProxyAPI deployment and management' -ForegroundColor DarkGray
 Write-Host ''
 
 # Check git

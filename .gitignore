@@ -18,7 +18,7 @@ pnpm-debug.log*
 # Auth credentials
 auth/
 backups/
-antigravity-proxy-backup-*.tgz
+cli-proxy-manager-backup-*.tgz
 
 # Local workspace state
 .codex/

@@ -2,8 +2,8 @@
 # =============================================================================
 #
 #   ╔═══════════════════════════════════════════════════════════════════╗
-#   ║   Antigravity Proxy — One-Click Deployment for CLIProxyAPI      ║
-#   ║   反代 Antigravity，在 Claude Code / Cursor 等工具中使用            ║
+#   ║   CLI Proxy Manager — One-Click Deployment for CLIProxyAPI      ║
+#   ║   部署和管理 CLIProxyAPI，在 Claude Code / Cursor 等工具中使用            ║
 #   ╚═══════════════════════════════════════════════════════════════════╝
 #
 #   用法:  bash deploy.sh          # 交互式完整部署
@@ -37,16 +37,16 @@ set -euo pipefail
 readonly VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DOCKER_IMAGE="eceasy/cli-proxy-api:latest"
-readonly COMPOSE_PROJECT_NAME="antigravity-proxy"
+readonly COMPOSE_PROJECT_NAME="cli-proxy-manager"
 export COMPOSE_PROJECT_NAME
-readonly CONTAINER_NAME="antigravity-proxy"
-readonly AUTH_VOLUME="antigravity-proxy-auth"
+readonly CONTAINER_NAME="cli-proxy-manager"
+readonly AUTH_VOLUME="cli-proxy-manager-auth"
 readonly OAUTH_PORT=51121
 readonly CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 readonly AUTO_UPDATE_LOG="${SCRIPT_DIR}/logs/auto-update.log"
-readonly AUTO_UPDATE_MARKER_BEGIN="# >>> antigravity-proxy auto-update >>>"
-readonly AUTO_UPDATE_MARKER_END="# <<< antigravity-proxy auto-update <<<"
+readonly AUTO_UPDATE_MARKER_BEGIN="# >>> cli-proxy-manager auto-update >>>"
+readonly AUTO_UPDATE_MARKER_END="# <<< cli-proxy-manager auto-update <<<"
 
 # 用户可配置（在 .env 中覆盖）
 CPA_PORT="${CPA_PORT:-8317}"
@@ -253,7 +253,7 @@ config_api_key_count() {
 resolve_backup_path() {
     local requested="${1:-}"
     if [[ -z "$requested" ]]; then
-        printf '%s/backups/antigravity-proxy-backup-%s.tgz' "${SCRIPT_DIR}" "$(date '+%Y%m%d-%H%M%S')"
+        printf '%s/backups/cli-proxy-manager-backup-%s.tgz' "${SCRIPT_DIR}" "$(date '+%Y%m%d-%H%M%S')"
     elif [[ "$requested" = /* ]]; then
         printf '%s' "$requested"
     else
@@ -368,7 +368,7 @@ config_wizard() {
 
     cat > "${CONFIG_FILE}" << YAML
 # =============================================================================
-#  Antigravity Proxy 配置文件
+#  CLI Proxy Manager 配置文件
 #  由 deploy.sh 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 # =============================================================================
 
@@ -1105,7 +1105,7 @@ cmd_restore() {
     local source_file="${1:-}"
     if [[ -z "${source_file}" ]]; then
         error "缺少备份文件"
-        detail "用法: bash deploy.sh restore backups/antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz"
+        detail "用法: bash deploy.sh restore backups/cli-proxy-manager-backup-YYYYmmdd-HHMMSS.tgz"
         return 1
     fi
     [[ "${source_file}" = /* ]] || source_file="${SCRIPT_DIR}/${source_file}"
@@ -1341,7 +1341,7 @@ cmd_uninstall() {
     [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
 
     echo ""
-    warn "即将完全卸载 Antigravity Proxy"
+    warn "即将完全卸载 CLI Proxy Manager"
     echo ""
 
     if ! confirm "确认卸载？(这将删除容器、凭证卷和配置文件)" "n"; then
@@ -1445,8 +1445,8 @@ console.log(JSON.stringify(s,null,2));
 
 show_help() {
     echo ""
-    echo -e "  ${BOLD}Antigravity Proxy${NC} v${VERSION}"
-    echo -e "  ${DIM}一键部署 CLIProxyAPI 反代 Antigravity${NC}"
+    echo -e "  ${BOLD}CLI Proxy Manager${NC} v${VERSION}"
+    echo -e "  ${DIM}一键部署和管理 CLIProxyAPI${NC}"
     echo ""
     echo -e "  ${BOLD}用法:${NC}"
     echo -e "    bash deploy.sh ${DIM}[命令]${NC}"
@@ -1492,7 +1492,7 @@ show_help() {
     echo -e "    bash deploy.sh enable-auto-update \"20 4 * * *\""
     echo ""
     echo -e "    ${DIM}# 远程一键安装${NC}"
-    echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash"
+    echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash"
     echo ""
 }
 

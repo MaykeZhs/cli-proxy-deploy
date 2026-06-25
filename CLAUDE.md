@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Is
 
-**Antigravity Proxy** — shell scripts and Docker Compose config that wrap [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) to provide a one-click reverse proxy for Antigravity, Claude Code, Gemini CLI, and Codex. There is no application code compiled here; the logic lives entirely in `deploy.sh` (Bash) and `deploy.ps1` (PowerShell 7+), with `docker-compose.yml` driving the container.
+**CLI Proxy Manager** — shell scripts and Docker Compose config that wrap [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) to provide a one-click reverse proxy for Antigravity, Claude Code, Gemini CLI, and Codex. There is no application code compiled here; the logic lives entirely in `deploy.sh` (Bash) and `deploy.ps1` (PowerShell 7+), with `docker-compose.yml` driving the container.
 
 ## Key Commands
 
@@ -45,7 +45,7 @@ Custom port: `CPA_PORT=9000 bash deploy.sh start` / `$env:CPA_PORT=9000; .\deplo
 deploy.sh / deploy.ps1
   └─ config_wizard()        → writes config.yaml from config.example.yaml template
   └─ do_login()             → runs a one-off `docker run --rm -it` container to handle OAuth,
-                              stores credentials in Docker volume `antigravity-proxy-auth`
+                              stores credentials in Docker volume `cli-proxy-manager-auth`
   └─ start_service()        → docker compose up -d using docker-compose.yml
                               polls GET /v1/models to confirm readiness
 ```
@@ -54,12 +54,12 @@ deploy.sh / deploy.ps1
 1. `deploy.sh` / `deploy.ps1` reads `.env` (if present) for `CPA_PORT`, `CPA_API_KEY`, `CPA_MANAGEMENT_KEY`.
 2. Config wizard generates `config.yaml` (never committed — in `.gitignore`).
 3. `docker-compose.yml` bind-mounts `./config.yaml` into the container at `/CLIProxyAPI/config.yaml` with `create_host_path: false` (prevents Docker auto-creating a directory if the file is missing — a common footgun).
-4. OAuth credentials are persisted in the named volume `antigravity-proxy-auth` (mounted at `/root/.cli-proxy-api` inside the container).
+4. OAuth credentials are persisted in the named volume `cli-proxy-manager-auth` (mounted at `/root/.cli-proxy-api` inside the container).
 
-**Docker image:** `eceasy/cli-proxy-api:latest`  
-**Default port:** `8317` (host-bound to `127.0.0.1` by default via `CPA_BIND_HOST`)  
-**Container name:** `antigravity-proxy`  
-**Auth volume:** `antigravity-proxy-auth`
+**Docker image:** `eceasy/cli-proxy-api:latest`
+**Default port:** `8317` (host-bound to `127.0.0.1` by default via `CPA_BIND_HOST`)
+**Container name:** `cli-proxy-manager`
+**Auth volume:** `cli-proxy-manager-auth`
 
 **OAuth port quirk:** Codex uses callback port `1455`; all other providers use `51121`. The deploy scripts map the correct port for each provider at login time.
 

@@ -1,9 +1,9 @@
 # 优化执行清单
 
-> 项目：`cli-proxy-deploy`  
-> 审查日期：2026-06-25  
-> 当前代码：已更新到 `origin/main` 最新提交 `a9bc803`  
-> 文档用途：把代码审查结果整理成可执行的优化清单，方便后续逐项处理。  
+> 项目：`cli-proxy-manager`
+> 审查日期：2026-06-25
+> 当前代码：已更新到 `origin/main` 最新提交 `a9bc803`
+> 文档用途：把代码审查结果整理成可执行的优化清单，方便后续逐项处理。
 > 说明：本清单基于静态审查和Git变更分析，未运行完整部署流程。
 
 ---
@@ -139,9 +139,9 @@ bash deploy.sh status
   - `enable-auto-update` 使用标记块管理 crontab：
 
 ```text
-# >>> antigravity-proxy auto-update >>>
+# >>> cli-proxy-manager auto-update >>>
 ...
-# <<< antigravity-proxy auto-update <<<
+# <<< cli-proxy-manager auto-update <<<
 ```
 
 - 优点：
@@ -322,8 +322,8 @@ bash deploy.sh status
 ### P1-1 项目命名和定位调整
 
 - 现状：
-  - 当前项目名是 `cli-proxy-deploy`。
-  - 文档或命令中可能出现 `antigravity-proxy`、`Antigravity` 等表述。
+  - 当前项目名是 `cli-proxy-manager`。
+  - 文档或命令中可能出现 `cli-proxy-manager`、`Antigravity` 等表述。
   - 项目实际功能不是 Antigravity CLI 本体，而是部署、配置和增强 CLI Proxy API 的工具集合。
 
 - 风险：
@@ -782,122 +782,74 @@ healthcheck:
 
 ---
 
-## 5. 项目命名和定位建议
+## 5. 项目命名和定位状态
 
-### 5.1 命名问题判断
+### 5.1 已采用名称
 
-你提到的判断是对的：这个项目不应该让人理解成“Antigravity CLI”。
+已决定将项目统一命名为：
+
+```text
+cli-proxy-manager
+```
+
+展示名称统一为：
+
+```text
+CLI Proxy Manager
+```
+
+### 5.2 定位说明
+
+这个项目不应该让人理解成“Antigravity CLI”。
 
 它更准确的定位是：
 
-> 部署和管理 CLI Proxy API 的工具集，并提供一些便捷增强能力。
+> 部署、配置和管理 CLIProxyAPI 的辅助工具，并提供 Provider 登录、备份恢复、健康检查、自动更新等增强能力。
 
-因此名字最好体现：
+因此文档和脚本中应优先使用：
 
-- deploy
-- setup
-- manager
-- launcher
-- toolkit
-- proxy
-- helper
+- CLI Proxy Manager
+- cli-proxy-manager
+- CLIProxyAPI deployment and management
+- 部署和管理 CLIProxyAPI
 
-而不是体现成某个CLI客户端本体。
+不应把项目本身描述为：
 
-### 5.2 当前名字 `cli-proxy-deploy`
+- Antigravity CLI
+- Antigravity 客户端
+- 官方客户端
 
-这个名字其实比 `antigravity-cli` 更准确。
+### 5.3 允许保留的 Antigravity 表述
 
-优点：
+以下内容可以继续保留 `Antigravity`，因为它们指的是 Provider 或 CLIProxyAPI 的配置项，而不是项目名称：
 
-- 说明这是 `cli-proxy` 的部署项目。
-- 没有假装自己是CLI本体。
-- 简短直接。
+- Provider 选择菜单中的 `Antigravity`。
+- `antigravity` 登录参数。
+- `antigravity-credits` 配置项。
+- 模型示例中的 `owned_by: "antigravity"`。
+- Codex 与 Antigravity OAuth callback port 的区别说明。
 
-缺点：
+### 5.4 已更新范围
 
-- “deploy”偏一次性安装，不完全覆盖管理、备份、自动更新、登录、配置这些能力。
-- 不够产品化。
+本次改名应覆盖：
 
-### 5.3 推荐名称
+- README标题和安装路径。
+- 安装脚本默认仓库地址。
+- Docker Compose project name。
+- 容器名。
+- Docker volume名。
+- 备份文件名前缀。
+- 自动更新cron marker。
+- SECURITY、CLAUDE、REVIEW中的项目名。
 
-#### 最推荐：`cli-proxy-manager`
-
-含义：
-
-> CLI Proxy 的部署和管理工具。
-
-优点：
-
-- 覆盖部署、更新、备份、恢复、登录、状态检查等管理能力。
-- 不会误解成CLI本体。
-- 比 `deploy` 更长期、完整。
-
-#### 次推荐：`cli-proxy-toolkit`
-
-含义：
-
-> CLI Proxy 工具箱。
-
-优点：
-
-- 适合包含多种辅助能力。
-- 比 `manager` 更宽泛。
-
-缺点：
-
-- 稍微不如 `manager` 明确。
-
-#### 次推荐：`cli-proxy-deploy-kit`
-
-含义：
-
-> CLI Proxy 部署套件。
-
-优点：
-
-- 保留当前 `deploy` 的含义。
-- 比 `cli-proxy-deploy` 更像一个完整套件。
-
-缺点：
-
-- 名字略长。
-
-#### 不建议：`antigravity-cli`
-
-原因：
-
-- 容易让用户误以为这是 Antigravity CLI 本体。
-- 与项目实际功能不符。
-- 容易带来官方归属误解。
-
-#### 谨慎使用：`antigravity-proxy`
-
-原因：
-
-- 如果项目主要部署的是 CLI Proxy API，而不是只服务 Antigravity，一个过强的 Antigravity 前缀会缩小理解范围。
-- 但如果你明确只面向 Antigravity 使用场景，可以保留在容器名或显示名中。
-
-### 5.4 README推荐开头文案
-
-建议README开头增加类似说明：
+README首屏推荐保持类似说明：
 
 ```markdown
 # CLI Proxy Manager
 
 本项目不是 Antigravity CLI 本体，也不是官方客户端。
 
-它是一个用于部署、配置和管理 CLI Proxy API 的辅助工具，提供 Docker Compose 部署、Provider 登录、配置生成、备份恢复、健康检查和自动更新等能力。
-```
-
-如果继续使用当前仓库名，也可以写：
-
-```markdown
-# cli-proxy-deploy
-
-本项目不是 Antigravity CLI 本体，也不是官方客户端。
-
-它是一个用于部署、配置和管理 CLI Proxy API 的辅助工具。
+它是用于部署、配置和管理 CLIProxyAPI 的辅助工具。
 ```
 
 ---

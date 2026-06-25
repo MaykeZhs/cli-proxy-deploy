@@ -7,7 +7,7 @@ Do not commit:
 - `config.yaml`
 - `.env`
 - OAuth credential JSON files
-- Docker volume backups for `antigravity-proxy-auth`
+- Docker volume backups for `cli-proxy-manager-auth`
 
 If a key or OAuth credential is exposed, rotate it immediately:
 

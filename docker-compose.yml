@@ -1,13 +1,13 @@
 # =============================================================================
-#  CLIProxyAPI Docker Compose - Antigravity Reverse Proxy
+#  CLIProxyAPI Docker Compose - CLI Proxy Manager
 # =============================================================================
 
-name: antigravity-proxy
+name: cli-proxy-manager
 
 services:
   cliproxyapi:
     image: eceasy/cli-proxy-api:latest
-    container_name: antigravity-proxy
+    container_name: cli-proxy-manager
     restart: unless-stopped
     ports:
       - "${CPA_BIND_HOST:-127.0.0.1}:${CPA_PORT:-8317}:8317"
@@ -28,4 +28,4 @@ services:
 
 volumes:
   cpa-auth:
-    name: antigravity-proxy-auth
+    name: cli-proxy-manager-auth

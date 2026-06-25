@@ -2,8 +2,8 @@
 # =============================================================================
 #
 #   ╔═══════════════════════════════════════════════════════════════════╗
-#   ║   Antigravity Proxy — One-Click Deployment for CLIProxyAPI      ║
-#   ║   反代 Antigravity，在 Claude Code / Cursor 等工具中使用            ║
+#   ║   CLI Proxy Manager — One-Click Deployment for CLIProxyAPI      ║
+#   ║   部署和管理 CLIProxyAPI，在 Claude Code / Cursor 等工具中使用            ║
 #   ╚═══════════════════════════════════════════════════════════════════╝
 #
 #   用法:  .\deploy.ps1          # 交互式完整部署
@@ -30,10 +30,10 @@ $ErrorActionPreference = 'Stop'
 $script:VERSION        = '1.0.0'
 $script:SCRIPT_DIR     = $PSScriptRoot
 $script:DOCKER_IMAGE   = 'eceasy/cli-proxy-api:latest'
-$script:COMPOSE_PROJECT_NAME = 'antigravity-proxy'
+$script:COMPOSE_PROJECT_NAME = 'cli-proxy-manager'
 $env:COMPOSE_PROJECT_NAME    = $script:COMPOSE_PROJECT_NAME
-$script:CONTAINER_NAME = 'antigravity-proxy'
-$script:AUTH_VOLUME    = 'antigravity-proxy-auth'
+$script:CONTAINER_NAME = 'cli-proxy-manager'
+$script:AUTH_VOLUME    = 'cli-proxy-manager-auth'
 $script:OAUTH_PORT     = 51121
 $script:CONFIG_FILE    = Join-Path $script:SCRIPT_DIR 'config.yaml'
 $script:COMPOSE_FILE   = Join-Path $script:SCRIPT_DIR 'docker-compose.yml'
@@ -267,7 +267,7 @@ function Sync-ApiKeyFromConfig {
 function Resolve-BackupPath($requestedPath) {
     if (-not $requestedPath) {
         $backupDir = Join-Path $script:SCRIPT_DIR 'backups'
-        return (Join-Path $backupDir ("antigravity-proxy-backup-{0}.tgz" -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
+        return (Join-Path $backupDir ("cli-proxy-manager-backup-{0}.tgz" -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
     }
 
     if ([System.IO.Path]::IsPathRooted($requestedPath)) {
@@ -411,7 +411,7 @@ function config-wizard {
     }) -join [Environment]::NewLine
     $configContent = @"
 # =============================================================================
-#  Antigravity Proxy 配置文件
+#  CLI Proxy Manager 配置文件
 #  由 deploy.ps1 自动生成于 $timestamp
 # =============================================================================
 
@@ -1214,7 +1214,7 @@ function cmd-backup($requestedPath = '') {
         exit 1
     }
 
-    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("antigravity-proxy-backup-{0}" -f [guid]::NewGuid())
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cli-proxy-manager-backup-{0}" -f [guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
     try {
         if ($hasConfig) {
@@ -1247,7 +1247,7 @@ function cmd-backup($requestedPath = '') {
 function cmd-restore($sourceFile = '') {
     if (-not $sourceFile) {
         error-msg '缺少备份文件'
-        detail '用法: .\deploy.ps1 restore backups\antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz'
+        detail '用法: .\deploy.ps1 restore backups\cli-proxy-manager-backup-YYYYmmdd-HHMMSS.tgz'
         exit 1
     }
     if (-not [System.IO.Path]::IsPathRooted($sourceFile)) {
@@ -1264,7 +1264,7 @@ function cmd-restore($sourceFile = '') {
         return
     }
 
-    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("antigravity-proxy-restore-{0}" -f [guid]::NewGuid())
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cli-proxy-manager-restore-{0}" -f [guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
     try {
         tar -xzf $sourceFile -C $tmpDir
@@ -1373,7 +1373,7 @@ function cmd-uninstall {
     if (-not $script:COMPOSE_CMD) { error-msg 'Docker Compose 不可用'; exit 1 }
 
     Write-Host ''
-    warn '即将完全卸载 Antigravity Proxy'
+    warn '即将完全卸载 CLI Proxy Manager'
     Write-Host ''
 
     if (-not (confirm-prompt '确认卸载？(这将删除容器、凭证卷和配置文件)' 'n')) {
@@ -1473,8 +1473,8 @@ function cmd-setup-claude {
 
 function show-help {
     Write-Host ''
-    Write-Host "  Antigravity Proxy v$script:VERSION"
-    Write-Host '  一键部署 CLIProxyAPI 反代 Antigravity' -ForegroundColor DarkGray
+    Write-Host "  CLI Proxy Manager v$script:VERSION"
+    Write-Host '  一键部署和管理 CLIProxyAPI' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '  用法:'
     Write-Host '    .\deploy.ps1 [命令]' -ForegroundColor DarkGray

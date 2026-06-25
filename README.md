@@ -1,10 +1,14 @@
 <div align="center">
 
-# 🚀 Antigravity Proxy
+# 🚀 CLI Proxy Manager
 
-**一键部署 CLIProxyAPI，反代 Antigravity / Claude Code / Gemini CLI / Codex**
+**一键部署和管理 CLIProxyAPI，支持 Antigravity / Claude Code / Gemini CLI / Codex 等 Provider**
 
-**One-click CLIProxyAPI deployment to reverse proxy Antigravity / Claude Code / Gemini CLI / Codex**
+**One-click CLIProxyAPI deployment and management for Antigravity / Claude Code / Gemini CLI / Codex providers**
+
+> 本项目不是 Antigravity CLI 本体，也不是官方客户端。它是用于部署、配置和管理 CLIProxyAPI 的辅助工具。
+>
+> This project is not the Antigravity CLI itself or an official client. It is a helper toolkit for deploying, configuring, and managing CLIProxyAPI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
@@ -51,20 +55,20 @@
 
 ### 方式一：远程一键安装
 
-默认安装到 `~/.antigravity-proxy`（Windows 为 `%USERPROFILE%\.antigravity-proxy`），再次运行会自动更新。
+默认安装到 `~/.cli-proxy-manager`（Windows 为 `%USERPROFILE%\.cli-proxy-manager`），再次运行会自动更新。
 
 **Linux / macOS:**
 
 ```bash
 # Download the installer and run it with Bash
-curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 # Download the installer to the current folder, then run it
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
 > 如果执行策略阻止脚本，请使用：`pwsh -ExecutionPolicy Bypass -File .\install.ps1`
@@ -75,10 +79,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-pr
 
 ```bash
 # Download the project
-git clone https://github.com/MaykeZhs/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/cli-proxy-manager.git
 
 # Enter the project folder
-cd antigravity-proxy
+cd cli-proxy-manager
 
 # Start the interactive deployment
 bash deploy.sh
@@ -88,10 +92,10 @@ bash deploy.sh
 
 ```powershell
 # Download the project
-git clone https://github.com/MaykeZhs/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/cli-proxy-manager.git
 
 # Enter the project folder
-cd antigravity-proxy
+cd cli-proxy-manager
 
 # Start the interactive deployment
 .\deploy.ps1
@@ -117,20 +121,20 @@ cd antigravity-proxy
 
 ### Option 1: Remote One-Click Install
 
-Installs to `~/.antigravity-proxy` (Windows: `%USERPROFILE%\.antigravity-proxy`). Running again auto-updates.
+Installs to `~/.cli-proxy-manager` (Windows: `%USERPROFILE%\.cli-proxy-manager`). Running again auto-updates.
 
 **Linux / macOS:**
 
 ```bash
 # Download the installer and run it with Bash
-curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 # Download the installer to the current folder, then run it
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.ps1 -OutFile install.ps1; .\install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
 > If the execution policy blocks the script: `pwsh -ExecutionPolicy Bypass -File .\install.ps1`
@@ -141,10 +145,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/antigravity-pr
 
 ```bash
 # Download the project
-git clone https://github.com/MaykeZhs/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/cli-proxy-manager.git
 
 # Enter the project folder
-cd antigravity-proxy
+cd cli-proxy-manager
 
 # Start the interactive deployment
 bash deploy.sh
@@ -154,10 +158,10 @@ bash deploy.sh
 
 ```powershell
 # Download the project
-git clone https://github.com/MaykeZhs/antigravity-proxy.git
+git clone https://github.com/MaykeZhs/cli-proxy-manager.git
 
 # Enter the project folder
-cd antigravity-proxy
+cd cli-proxy-manager
 
 # Start the interactive deployment
 .\deploy.ps1
@@ -188,7 +192,7 @@ After startup, run `doctor` first. It checks Docker, the container, `config.yaml
 **Linux / macOS:**
 
 ```bash
-cd antigravity-proxy
+cd cli-proxy-manager
 bash deploy.sh doctor
 
 # Service status and loaded credentials
@@ -210,7 +214,7 @@ curl -i http://127.0.0.1:8317/v1/models \
 **Windows (PowerShell):**
 
 ```powershell
-cd antigravity-proxy
+cd cli-proxy-manager
 .\deploy.ps1 doctor
 
 # Service status and loaded credentials
@@ -528,9 +532,9 @@ bash deploy.sh doctor
 .\deploy.ps1 doctor
 ```
 
-`backup` 默认写入 `backups/antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz`，包含 `config.yaml` 和 Docker volume `antigravity-proxy-auth` 中的 OAuth 凭证（如果存在）。`backups/` 已被 `.gitignore` 忽略。
+`backup` 默认写入 `backups/cli-proxy-manager-backup-YYYYmmdd-HHMMSS.tgz`，包含 `config.yaml` 和 Docker volume `cli-proxy-manager-auth` 中的 OAuth 凭证（如果存在）。`backups/` 已被 `.gitignore` 忽略。
 
-`backup` writes to `backups/antigravity-proxy-backup-YYYYmmdd-HHMMSS.tgz` by default. It includes `config.yaml` and OAuth credentials from the Docker volume `antigravity-proxy-auth` when present. `backups/` is ignored by Git.
+`backup` writes to `backups/cli-proxy-manager-backup-YYYYmmdd-HHMMSS.tgz` by default. It includes `config.yaml` and OAuth credentials from the Docker volume `cli-proxy-manager-auth` when present. `backups/` is ignored by Git.
 
 ```bash
 bash deploy.sh backup
@@ -643,7 +647,7 @@ After running, you can use `claude` directly in the terminal without manually se
 ## 🏗️ 项目结构 / Project Structure
 
 ```
-antigravity-proxy/
+cli-proxy-manager/
 ├── deploy.sh              # 主部署脚本 (Linux/macOS) / Main deployment script
 ├── deploy.ps1             # 主部署脚本 (Windows) / Main deployment script (Windows)
 ├── install.sh             # 远程安装脚本 (Linux/macOS) / Remote installer
@@ -691,29 +695,29 @@ Do not paste OAuth callback URLs into public issues or screenshots because the `
 </details>
 
 <details>
-<summary><b>container name "/antigravity-proxy" is already in use</b></summary>
+<summary><b>container name "/cli-proxy-manager" is already in use</b></summary>
 
 这通常发生在你重命名项目目录、复制项目目录，或从另一个 Compose project 启动过同一个容器名之后。`docker ps` 只显示运行中的容器，所以冲突容器可能是 stopped 状态。
 
 This usually happens after renaming/copying the project folder or starting the same container from a different Compose project. `docker ps` only shows running containers, so the conflicting container may be stopped.
 
 ```bash
-docker ps -a --filter name=antigravity-proxy
-docker rm antigravity-proxy
+docker ps -a --filter name=cli-proxy-manager
+docker rm cli-proxy-manager
 docker compose up -d
 ```
 
 **Windows:**
 
 ```powershell
-docker ps -a --filter name=antigravity-proxy
-docker rm antigravity-proxy
+docker ps -a --filter name=cli-proxy-manager
+docker rm cli-proxy-manager
 docker compose up -d
 ```
 
-如果你想保留 OAuth 登录状态，不要删除 `antigravity-proxy-auth` volume。
+如果你想保留 OAuth 登录状态，不要删除 `cli-proxy-manager-auth` volume。
 
-Do not remove the `antigravity-proxy-auth` volume if you want to keep OAuth credentials.
+Do not remove the `cli-proxy-manager-auth` volume if you want to keep OAuth credentials.
 
 If Docker shows a warning that this volume was created for another project name, it is usually safe to keep using it. The warning means Compose is reusing the existing credential volume.
 
@@ -888,7 +892,7 @@ $env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
 ## 🔒 安全 / Security
 
 - `config.yaml` 和 `.env` 包含本地密钥，已被 `.gitignore` 忽略。
-- OAuth 凭证保存在 Docker volume `antigravity-proxy-auth` 中；`backup` 生成的归档也包含敏感信息，不要上传到公开仓库。
+- OAuth 凭证保存在 Docker volume `cli-proxy-manager-auth` 中；`backup` 生成的归档也包含敏感信息，不要上传到公开仓库。
 - 发布截图、日志、README 示例时，不要包含真实 API key、OAuth 邮箱或凭证文件名。
 
 See [SECURITY.md](SECURITY.md) for the full checklist.

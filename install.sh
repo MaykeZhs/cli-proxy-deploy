@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  Antigravity Proxy — Remote One-Click Installer
+#  CLI Proxy Manager — Remote One-Click Installer
 #  远程一键安装脚本
 #
 #  Usage / 用法:
-#    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/antigravity-proxy/main/install.sh | bash
-#    REPO_URL=https://github.com/MaykeZhs/antigravity-proxy bash install.sh
+#    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash
+#    REPO_URL=https://github.com/MaykeZhs/cli-proxy-manager bash install.sh
 # =============================================================================
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/MaykeZhs/antigravity-proxy}"
-INSTALL_DIR="${INSTALL_DIR:-${HOME}/.antigravity-proxy}"
+REPO_URL="${REPO_URL:-https://github.com/MaykeZhs/cli-proxy-manager}"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.cli-proxy-manager}"
 BRANCH="${BRANCH:-main}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
@@ -20,8 +20,8 @@ info()  { echo -e "  ${GREEN}✔${NC}  $*"; }
 error() { echo -e "  ${RED}✘${NC}  $*"; }
 
 echo ""
-echo -e "  ${CYAN}${BOLD}Antigravity Proxy — Installer${NC}"
-echo -e "  ${DIM}One-click CLIProxyAPI deployment for Antigravity${NC}"
+echo -e "  ${CYAN}${BOLD}CLI Proxy Manager — Installer${NC}"
+echo -e "  ${DIM}One-click CLIProxyAPI deployment and management${NC}"
 echo ""
 
 # Check git
