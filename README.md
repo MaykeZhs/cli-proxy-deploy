@@ -464,7 +464,8 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 检查镜像更新 / Check image update | `bash deploy.sh check-update` | `.\deploy.ps1 check-update` |
 | 更新到最新版 / Update to latest | `bash deploy.sh update` | `.\deploy.ps1 update` |
 | 有新镜像时才更新 / Update only if needed | `bash deploy.sh auto-update` | — |
-| 启用自动更新 / Enable auto-update | `bash deploy.sh enable-auto-update` | — |
+| 启用自动更新 / Enable auto-update | `bash deploy.sh enable-auto-update [计划]` | — |
+| 查看自动更新状态 / Auto-update status | `bash deploy.sh auto-update-status` | — |
 | 禁用自动更新 / Disable auto-update | `bash deploy.sh disable-auto-update` | — |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
@@ -491,8 +492,14 @@ bash deploy.sh auto-update
 # Enable daily auto-update at 04:20 and write logs to logs/auto-update.log
 bash deploy.sh enable-auto-update
 
-# Use a custom cron schedule
+# Schedule aliases: daily, 12h, 6h, hourly, weekly
+bash deploy.sh enable-auto-update 12h
+
+# Or use a custom cron schedule
 bash deploy.sh enable-auto-update "20 4 * * *"
+
+# Show schedule and recent auto-update logs
+bash deploy.sh auto-update-status
 
 # Disable the managed auto-update cron entry
 bash deploy.sh disable-auto-update
@@ -501,7 +508,7 @@ bash deploy.sh disable-auto-update
 bash deploy.sh status
 ```
 
-`auto-update` is designed for cron. It compares the local and remote Docker image digest first. If they match, it exits without pulling, recreating, or restarting the container. `enable-auto-update` writes a marked crontab block so running it again safely replaces the previous schedule without touching your other cron jobs.
+`auto-update` is designed for cron. It compares the local and remote Docker image digest first. If they match, it exits without pulling, recreating, or restarting the container. `enable-auto-update` accepts schedule aliases (`daily`, `12h`, `6h`, `hourly`, `weekly`) or a custom 5-field cron expression, and writes a marked crontab block so running it again safely replaces the previous schedule without touching your other cron jobs. Use `auto-update-status` to view the current schedule and recent logs.
 
 The scheduling commands, `enable-auto-update` and `disable-auto-update`, are Linux/macOS only because they use `crontab`.
 

@@ -29,7 +29,7 @@ deploy.sh | 136 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 ```bash
 bash deploy.sh auto-update
-bash deploy.sh enable-auto-update [cron]
+bash deploy.sh enable-auto-update [计划]
 bash deploy.sh disable-auto-update
 ```
 
@@ -41,13 +41,13 @@ bash deploy.sh disable-auto-update
 
 ```text
 ?? REVIEW.md
-?? auto-update.sh
+(已处理) auto-update.sh 已合并进 deploy.sh 并删除独立脚本
 ```
 
 说明：
 
 - `REVIEW.md`：本优化清单。
-- `auto-update.sh`：本地存在但远端没有，且功能可能已经被最新 `deploy.sh` 替代。
+- `auto-update.sh`：已将有价值的计划别名、状态查看、日志查看和cron环境PATH逻辑合并进 `deploy.sh`，独立脚本已删除。
 
 ### 0.3 总体判断
 
@@ -61,27 +61,25 @@ bash deploy.sh disable-auto-update
 
 ## 1. P0：必须优先处理
 
-### P0-1 清理或合并本地 `auto-update.sh`
+### P0-1 合并并删除本地 `auto-update.sh`
 
 - 现状：
   - 最新 `deploy.sh` 已内置：
     - `auto-update`
     - `enable-auto-update`
     - `disable-auto-update`
-  - 本地仍有未跟踪文件 `auto-update.sh`。
+  - 原本地未跟踪文件 `auto-update.sh` 已合并进 `deploy.sh`。
 
 - 风险：
   - 两套自动更新逻辑并存，后续容易漂移。
-  - 用户不知道应该使用 `auto-update.sh` 还是 `deploy.sh auto-update`。
+  - 如果保留独立脚本，用户会不知道应该使用 `auto-update.sh` 还是 `deploy.sh auto-update`。
   - 如果误提交，README与实际推荐用法可能冲突。
 
 - 建议：
-  - 优先删除或归档 `auto-update.sh`。
-  - 如果其中有 `deploy.sh` 还没有的功能，先对比后合并进 `deploy.sh`。
-  - 不建议长期保留两个自动更新入口。
+  - 已将计划别名、状态查看、日志查看、cron运行提醒和cron PATH补全合并进 `deploy.sh`。
+  - 已删除独立 `auto-update.sh`，避免维护两个自动更新入口。
 
 - 涉及文件：
-  - `auto-update.sh`
   - `deploy.sh`
   - `README.md`
 
@@ -654,6 +652,7 @@ check-update
 update
 auto-update
 enable-auto-update
+auto-update-status
 disable-auto-update
 logout
 ```
@@ -750,7 +749,7 @@ healthcheck:
 
 ### 第一批：自动更新收尾
 
-1. 删除、归档或合并本地 `auto-update.sh`。
+1. 合并并删除本地 `auto-update.sh`。（已完成）
 2. 加强 `deploy.sh auto-update` 的失败日志和退出码。
 3. `enable-auto-update` 修改 crontab 前自动备份。
 4. README补充自动更新日志、cron查看和失败排查说明。
@@ -858,7 +857,7 @@ README首屏推荐保持类似说明：
 
 如果只想先挑最有价值的，我建议先做这五个：
 
-1. 删除或归档本地未跟踪的 `auto-update.sh`，避免和最新 `deploy.sh` 自动更新重复。
+1. 合并并删除本地 `auto-update.sh`，避免和最新 `deploy.sh` 自动更新重复。（已完成）
 2. 加强 `deploy.sh auto-update` 的失败处理和日志输出。
 3. 默认隐藏完整密钥。
 4. `.env` 加白名单和端口校验。

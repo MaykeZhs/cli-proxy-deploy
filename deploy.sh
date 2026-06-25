@@ -1281,8 +1281,35 @@ current_crontab_without_auto_update() {
         ' || true
 }
 
+current_auto_update_cron_line() {
+    crontab -l 2>/dev/null | awk \
+        -v begin="${AUTO_UPDATE_MARKER_BEGIN}" \
+        -v end="${AUTO_UPDATE_MARKER_END}" '
+            $0 == begin { show = 1; next }
+            $0 == end { show = 0; next }
+            show { print }
+        ' | head -1 || true
+}
+
+resolve_auto_update_schedule() {
+    case "${1:-}" in
+        ""|daily) echo "20 4 * * *" ;;
+        12h) echo "20 4,16 * * *" ;;
+        6h) echo "20 */6 * * *" ;;
+        hourly) echo "20 * * * *" ;;
+        weekly) echo "20 4 * * 1" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+cron_running() {
+    pgrep -x cron &>/dev/null || pgrep -x crond &>/dev/null
+}
+
 cmd_enable_auto_update() {
-    local schedule="${1:-20 4 * * *}"
+    local schedule_arg="${1:-daily}"
+    local schedule
+    schedule="$(resolve_auto_update_schedule "${schedule_arg}")"
 
     if ! command -v crontab &>/dev/null; then
         error "未检测到 crontab"
@@ -1292,6 +1319,7 @@ cmd_enable_auto_update() {
 
     if ! [[ "${schedule}" =~ ^[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+$ ]]; then
         error "cron 表达式格式不正确"
+        detail "示例: bash deploy.sh enable-auto-update daily"
         detail "示例: bash deploy.sh enable-auto-update \"20 4 * * *\""
         return 1
     fi
@@ -1299,10 +1327,11 @@ cmd_enable_auto_update() {
     require_config_file
     mkdir -p "$(dirname "${AUTO_UPDATE_LOG}")"
 
-    local quoted_script_dir quoted_log cron_line
+    local quoted_script_dir quoted_log cron_line cron_path
     quoted_script_dir="$(shell_quote "${SCRIPT_DIR}")"
     quoted_log="$(shell_quote "${AUTO_UPDATE_LOG}")"
-    cron_line="${schedule} cd ${quoted_script_dir} && bash deploy.sh auto-update >> ${quoted_log} 2>&1"
+    cron_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    cron_line="${schedule} cd ${quoted_script_dir} && PATH=${cron_path}:\$PATH bash deploy.sh auto-update >> ${quoted_log} 2>&1"
 
     local existing
     existing="$(current_crontab_without_auto_update)"
@@ -1315,9 +1344,13 @@ cmd_enable_auto_update() {
     } | crontab -
 
     info "已启用自动更新"
-    detail "计划: ${schedule}"
+    detail "计划: ${schedule_arg} (${schedule})"
     detail "日志: ${AUTO_UPDATE_LOG}"
     detail "命令: bash deploy.sh auto-update"
+    if ! cron_running; then
+        warn "cron 服务似乎未运行，定时任务不会触发"
+        detail "请确认 cron/crond 服务已经启动"
+    fi
 }
 
 cmd_disable_auto_update() {
@@ -1326,14 +1359,48 @@ cmd_disable_auto_update() {
         return 1
     fi
 
+    if [[ -z "$(current_auto_update_cron_line)" ]]; then
+        warn "当前未启用自动更新"
+        return 0
+    fi
+
     local existing
     existing="$(current_crontab_without_auto_update)"
 
-    {
-        [[ -n "${existing}" ]] && printf '%s\n' "${existing}"
-    } | crontab -
+    if [[ -n "${existing}" ]]; then
+        printf '%s\n' "${existing}" | crontab -
+    else
+        crontab -r 2>/dev/null || true
+    fi
 
     info "已禁用自动更新"
+}
+
+cmd_auto_update_status() {
+    if ! command -v crontab &>/dev/null; then
+        error "未检测到 crontab"
+        return 1
+    fi
+
+    step "自动更新状态"
+    local entry
+    entry="$(current_auto_update_cron_line)"
+    if [[ -n "${entry}" ]]; then
+        info "状态: 已启用"
+        detail "计划: $(awk '{print $1, $2, $3, $4, $5}' <<<"${entry}")"
+        detail "命令: ${entry}"
+        cron_running || warn "cron 服务似乎未运行，定时任务不会触发"
+    else
+        warn "状态: 未启用"
+        detail "开启: bash deploy.sh enable-auto-update"
+    fi
+
+    detail "日志: ${AUTO_UPDATE_LOG}"
+    if [[ -s "${AUTO_UPDATE_LOG}" ]]; then
+        echo ""
+        detail "最近日志:"
+        tail -n 8 "${AUTO_UPDATE_LOG}" | sed 's/^/       /'
+    fi
 }
 
 cmd_uninstall() {
@@ -1466,7 +1533,8 @@ show_help() {
     echo -e "    ${CYAN}check-update${NC}  只检查镜像是否有更新"
     echo -e "    ${CYAN}update${NC}       更新到最新版本"
     echo -e "    ${CYAN}auto-update${NC}  有新镜像时才更新（适合 cron）"
-    echo -e "    ${CYAN}enable-auto-update [cron]${NC} 启用自动更新"
+    echo -e "    ${CYAN}enable-auto-update [计划]${NC} 启用自动更新"
+    echo -e "    ${CYAN}auto-update-status${NC} 查看自动更新状态"
     echo -e "    ${CYAN}disable-auto-update${NC} 禁用自动更新"
     echo -e "    ${CYAN}uninstall${NC}    完全卸载"
     echo -e "    ${CYAN}setup-claude${NC} 自动配置 Claude Code 环境"
@@ -1529,7 +1597,8 @@ main() {
         check-update) cmd_check_update ;;
         update)     cmd_update ;;
         auto-update) cmd_auto_update ;;
-        enable-auto-update) shift; cmd_enable_auto_update "$*" ;;
+        enable-auto-update) shift; cmd_enable_auto_update "${1:-daily}" ;;
+        auto-update-status) cmd_auto_update_status ;;
         disable-auto-update) cmd_disable_auto_update ;;
         uninstall)  cmd_uninstall ;;
         setup-claude) cmd_setup_claude ;;
