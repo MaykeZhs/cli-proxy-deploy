@@ -356,6 +356,18 @@ config_wizard() {
         debug_mode="true"
     fi
 
+    # File logging (logging-to-file)
+    local logging_mode="false"
+    if confirm "是否开启文件日志？(logging-to-file，便于在面板 Logs 页查看)" "y"; then
+        logging_mode="true"
+    fi
+
+    # Plugin system (plugins.enabled)
+    local plugins_mode="false"
+    if confirm "是否启用插件系统？(plugins.enabled，安装插件后才会生效)" "y"; then
+        plugins_mode="true"
+    fi
+
     divider
 
     # Generate config.yaml
@@ -382,6 +394,9 @@ ${api_keys_yaml}
 
 debug: ${debug_mode}
 
+usage-statistics-enabled: true
+logging-to-file: ${logging_mode}
+
 request-retry: 3
 max-retry-interval: 30
 
@@ -403,6 +418,10 @@ remote-management:
   allow-remote: false
   secret-key: "${CPA_MANAGEMENT_KEY}"
   disable-control-panel: false
+
+plugins:
+  enabled: ${plugins_mode}
+  dir: "plugins"
 YAML
 
     info "配置文件已生成: ${CYAN}config.yaml${NC}"

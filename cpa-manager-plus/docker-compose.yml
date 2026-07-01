@@ -1,0 +1,20 @@
+# =============================================================================
+#  CPA-Manager-Plus —— CLIProxyAPI 外置用量/计费监控面板
+#  独立进程运行，不在代理内、不接管你的凭证；读取 CPA 的 usage 队列做分析
+#  启动：docker compose up -d   然后浏览器打开 http://<本机IP>:18317
+# =============================================================================
+services:
+  cpa-manager-plus:
+    image: seakee/cpa-manager-plus:latest
+    container_name: cpa-manager-plus
+    restart: unless-stopped
+    ports:
+      - "18317:18317"          # 面板访问端口，可自行改左侧宿主端口
+    volumes:
+      - cpa-manager-plus-data:/data   # SQLite 用量账本持久化
+    # 如需通过代理访问外网，可解开下面两行
+    # environment:
+    #   - HTTPS_PROXY=socks5://127.0.0.1:7890
+
+volumes:
+  cpa-manager-plus-data:

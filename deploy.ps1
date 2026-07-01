@@ -402,6 +402,18 @@ function config-wizard {
         $debugMode = 'true'
     }
 
+    # File logging (logging-to-file)
+    $loggingMode = 'false'
+    if (confirm-prompt '是否开启文件日志？(logging-to-file，便于在面板 Logs 页查看)' 'y') {
+        $loggingMode = 'true'
+    }
+
+    # Plugin system (plugins.enabled)
+    $pluginsMode = 'false'
+    if (confirm-prompt '是否启用插件系统？(plugins.enabled，安装插件后才会生效)' 'y') {
+        $pluginsMode = 'true'
+    }
+
     divider
 
     # Generate config.yaml
@@ -425,6 +437,9 @@ $apiKeysYaml
 
 debug: $debugMode
 
+usage-statistics-enabled: true
+logging-to-file: $loggingMode
+
 request-retry: 3
 max-retry-interval: 30
 
@@ -446,6 +461,10 @@ remote-management:
   allow-remote: false
   secret-key: "$script:CPA_MANAGEMENT_KEY"
   disable-control-panel: false
+
+plugins:
+  enabled: $pluginsMode
+  dir: "plugins"
 "@
     $configContent | Set-Content -Path $script:CONFIG_FILE -Encoding UTF8
 

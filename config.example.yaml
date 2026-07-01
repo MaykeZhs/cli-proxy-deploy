@@ -20,6 +20,12 @@ api-keys:
 # 调试日志（部署稳定后建议关闭）
 debug: false
 
+# 用量统计（token 级聚合，供 /usage-queue、/api-key-usage 查询；默认开启）
+usage-statistics-enabled: true
+
+# 文件日志（写入日志文件，便于在管理面板 Logs 页查看；默认开启）
+logging-to-file: true
+
 # 重试配置
 request-retry: 3
 max-retry-interval: 30
@@ -47,3 +53,9 @@ remote-management:
   allow-remote: false
   secret-key: ""                # 留空则禁用管理 API，填写则启用
   disable-control-panel: false
+
+# 插件系统（enabled 打开后，已安装并启用的插件才会运行；dir 为插件目录）
+# 安全提示：第三方插件在代理进程内运行、可访问凭证与流量，仅安装你信任的插件
+plugins:
+  enabled: true
+  dir: "plugins"
