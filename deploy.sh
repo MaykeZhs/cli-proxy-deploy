@@ -267,6 +267,15 @@ get_local_image_digest() {
 }
 
 get_remote_image_digest() {
+    local digest
+    if docker buildx version &>/dev/null; then
+        digest="$(docker buildx imagetools inspect "${DOCKER_IMAGE}" --format '{{.Manifest.Digest}}' 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ "${digest}" == sha256:* ]]; then
+            printf '%s\n' "${digest}"
+            return 0
+        fi
+    fi
+
     docker manifest inspect --verbose "${DOCKER_IMAGE}" 2>/dev/null \
         | awk -F'"' '/"digest"[[:space:]]*:/ { print $4; exit }'
 }
