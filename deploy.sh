@@ -1253,9 +1253,15 @@ cmd_auto_update() {
     [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
     require_config_file
 
+    local update_trigger="${CPA_UPDATE_TRIGGER:-manual}"
+    local trigger_label="手动执行"
+    [[ "${update_trigger}" == "cron" ]] && trigger_label="cron 定时任务"
+
     step "自动更新检查"
     detail "${DOCKER_IMAGE}"
-    detail "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    detail "触发来源: ${update_trigger}（${trigger_label}）"
+    detail "服务器时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    detail "北京时间: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
 
     if ! command -v docker &>/dev/null; then
         error "未检测到 Docker CLI"
@@ -1359,7 +1365,7 @@ cmd_enable_auto_update() {
     quoted_script_dir="$(shell_quote "${SCRIPT_DIR}")"
     quoted_log="$(shell_quote "${AUTO_UPDATE_LOG}")"
     cron_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    cron_line="${schedule} cd ${quoted_script_dir} && PATH=${cron_path}:\$PATH bash deploy.sh auto-update >> ${quoted_log} 2>&1"
+    cron_line="${schedule} cd ${quoted_script_dir} && PATH=${cron_path}:\$PATH CPA_UPDATE_TRIGGER=cron bash deploy.sh auto-update >> ${quoted_log} 2>&1"
 
     local existing
     existing="$(current_crontab_without_auto_update)"
@@ -1417,7 +1423,26 @@ cmd_auto_update_status() {
         info "状态: 已启用"
         detail "计划: $(awk '{print $1, $2, $3, $4, $5}' <<<"${entry}")"
         detail "命令: ${entry}"
+        if [[ "${entry}" != *"CPA_UPDATE_TRIGGER=cron"* ]]; then
+            warn "当前任务是旧格式，日志无法区分自动与手动执行"
+            detail "修复: bash deploy.sh enable-auto-update \"$(awk '{print $1, $2, $3, $4, $5}' <<<"${entry}")\""
+        fi
+        detail "服务器时区: $(date '+%Z (%z)')"
+        detail "当前服务器时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        detail "当前北京时间: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
         cron_running || warn "cron 服务似乎未运行，定时任务不会触发"
+
+        if command -v journalctl &>/dev/null; then
+            local latest_cron_record
+            latest_cron_record="$(journalctl -u cron --since '7 days ago' --no-pager 2>/dev/null | grep -F 'deploy.sh auto-update' | tail -1 || true)"
+            if [[ -n "${latest_cron_record}" ]]; then
+                detail "最近 cron 触发: ${latest_cron_record}"
+            else
+                warn "最近 cron 触发: 过去 7 天未找到系统记录"
+            fi
+        else
+            warn "最近 cron 触发: 系统没有 journalctl，无法自动查询"
+        fi
     else
         warn "状态: 未启用"
         detail "开启: bash deploy.sh enable-auto-update"
