@@ -18,6 +18,7 @@
 #          .\deploy.ps1 restore <file> # 恢复配置和凭证
 #          .\deploy.ps1 check-update # 检查镜像更新
 #          .\deploy.ps1 update   # 更新到最新版
+#          .\deploy.ps1 rollback # 回滚到更新前镜像
 #          .\deploy.ps1 uninstall # 完全卸载
 #          .\deploy.ps1 setup-claude # 配置 Claude Code
 #
@@ -30,6 +31,7 @@ $ErrorActionPreference = 'Stop'
 $script:VERSION        = '1.0.0'
 $script:SCRIPT_DIR     = $PSScriptRoot
 $script:DOCKER_IMAGE   = 'eceasy/cli-proxy-api:latest'
+$script:ROLLBACK_IMAGE = 'eceasy/cli-proxy-api:rollback'
 $script:COMPOSE_PROJECT_NAME = 'cli-proxy-manager'
 $env:COMPOSE_PROJECT_NAME    = $script:COMPOSE_PROJECT_NAME
 $script:CONTAINER_NAME = 'cli-proxy-manager'
@@ -320,6 +322,210 @@ function Get-RemoteImageDigest {
             $PSNativeCommandUseErrorActionPreference = $oldNativePreference
         }
     }
+}
+
+function Get-DockerImageId($image) {
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $imageId = docker image inspect --format '{{.Id}}' $image 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $imageId) { return '' }
+        return ($imageId | Select-Object -First 1)
+    } catch {
+        return ''
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+    }
+}
+
+function Set-DockerImageTag($source, $target) {
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        docker image tag $source $target 2>$null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+    }
+}
+
+function Save-CurrentImageForRollback {
+    $currentId = Get-DockerImageId $script:DOCKER_IMAGE
+    if (-not $currentId) {
+        try {
+            $currentId = docker inspect --format '{{.Image}}' $script:CONTAINER_NAME 2>$null
+            if ($LASTEXITCODE -ne 0) { $currentId = '' }
+        } catch { $currentId = '' }
+    }
+
+    if (-not $currentId) {
+        warn '未找到当前镜像，无法创建回滚点'
+        return $false
+    }
+
+    if (-not (Set-DockerImageTag $currentId $script:ROLLBACK_IMAGE)) {
+        warn '保存回滚镜像失败'
+        return $false
+    }
+
+    info '已保存更新前镜像'
+    detail "回滚镜像: $($script:ROLLBACK_IMAGE)"
+    return $true
+}
+
+function Test-ServiceHealth($attempts = 30, $delaySeconds = 1) {
+    Sync-ApiKeyFromConfig
+
+    for ($i = 0; $i -lt $attempts; $i++) {
+        try {
+            $headers = @{}
+            if ($script:CPA_API_KEY) {
+                $headers.Authorization = "Bearer $($script:CPA_API_KEY)"
+            }
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($script:CPA_PORT)/v1/models" `
+                -Headers $headers -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            if ([int]$response.StatusCode -eq 200) { return $true }
+        } catch {
+            if (-not $script:CPA_API_KEY -and $_.Exception.Response -and
+                [int]$_.Exception.Response.StatusCode -eq 401) {
+                return $true
+            }
+        }
+        Start-Sleep -Seconds $delaySeconds
+    }
+
+    return $false
+}
+
+function Invoke-ServiceRecreate {
+    Push-Location $script:SCRIPT_DIR
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $env:CPA_PORT = $script:CPA_PORT
+        $output = Invoke-Compose -f $script:COMPOSE_FILE up -d --force-recreate 2>&1
+        $composeExitCode = $LASTEXITCODE
+        if ($output) { detail ([string]($output | Select-Object -Last 1)) }
+        return $composeExitCode -eq 0
+    } catch {
+        detail $_.Exception.Message
+        return $false
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+        Pop-Location
+    }
+}
+
+function Invoke-SavedImageRollback {
+    $previousCurrentId = Get-DockerImageId $script:DOCKER_IMAGE
+    $rollbackId = Get-DockerImageId $script:ROLLBACK_IMAGE
+
+    if (-not $rollbackId) {
+        error-msg '没有可用的回滚镜像'
+        detail '先成功运行一次 update，脚本才会保存更新前镜像'
+        return $false
+    }
+
+    if ($previousCurrentId -eq $rollbackId) {
+        warn '当前镜像与回滚镜像相同，无需回滚'
+        return $true
+    }
+
+    if (-not (Set-DockerImageTag $rollbackId $script:DOCKER_IMAGE)) {
+        error-msg '无法将回滚镜像切换为当前镜像'
+        return $false
+    }
+    if ($previousCurrentId) {
+        $null = Set-DockerImageTag $previousCurrentId $script:ROLLBACK_IMAGE
+    }
+
+    if ((Invoke-ServiceRecreate) -and (Test-ServiceHealth)) {
+        info '镜像回滚成功'
+        return $true
+    }
+
+    error-msg '回滚后的服务健康检查失败，正在恢复回滚前镜像'
+    if ($previousCurrentId) {
+        $null = Set-DockerImageTag $previousCurrentId $script:DOCKER_IMAGE
+        $null = Set-DockerImageTag $rollbackId $script:ROLLBACK_IMAGE
+        $null = Invoke-ServiceRecreate
+    }
+    return $false
+}
+
+function Invoke-TransactionalUpdate {
+    $rollbackAvailable = Save-CurrentImageForRollback
+
+    step '拉取最新镜像'
+    detail $script:DOCKER_IMAGE
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    $pullExitCode = 1
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $pullOutput = docker pull $script:DOCKER_IMAGE 2>&1
+        $pullExitCode = $LASTEXITCODE
+        if ($pullOutput) { detail ([string]($pullOutput | Select-Object -Last 1)) }
+    } catch {
+        detail $_.Exception.Message
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+    }
+
+    if ($pullExitCode -ne 0) {
+        error-msg '镜像拉取失败；现有服务保持不变'
+        return $false
+    }
+
+    step '重建并检查服务'
+    if (-not (Invoke-ServiceRecreate)) {
+        error-msg '新容器启动失败'
+        if ($rollbackAvailable) {
+            warn '正在自动回滚'
+            $null = Invoke-SavedImageRollback
+        }
+        return $false
+    }
+
+    if (Test-ServiceHealth) {
+        info '更新完成，API 健康检查通过'
+        detail '手动回滚: .\deploy.ps1 rollback'
+        return $true
+    }
+
+    error-msg '新版本未通过 /v1/models 健康检查'
+    if ($rollbackAvailable) {
+        warn '正在自动回滚到更新前镜像'
+        $null = Invoke-SavedImageRollback
+    } else {
+        error-msg '没有更新前镜像，无法自动回滚'
+    }
+    return $false
 }
 
 function ensure-config-file-slot {
@@ -769,7 +975,8 @@ function show-result {
     Write-Host '  .\deploy.ps1 doctor     自检 Docker/配置/凭证/API' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 backup     备份配置和 OAuth 凭证' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 check-update 检查镜像更新' -ForegroundColor Cyan
-    Write-Host '  .\deploy.ps1 update     更新到最新版本' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 update     安全更新到最新版本' -ForegroundColor Cyan
+    Write-Host '  .\deploy.ps1 rollback   回滚到上一个镜像版本' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 login      重新 OAuth 登录' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 logout     退出 Provider 账号' -ForegroundColor Cyan
     Write-Host '  .\deploy.ps1 setup-claude 自动配置 Claude Code' -ForegroundColor Cyan
@@ -1378,13 +1585,18 @@ function cmd-update {
     if (-not $script:COMPOSE_CMD) { error-msg 'Docker Compose 不可用'; exit 1 }
     require-config-file
 
-    pull-image
-    Push-Location $script:SCRIPT_DIR
-    try {
-        $env:CPA_PORT = $script:CPA_PORT
-        Invoke-Compose -f $script:COMPOSE_FILE up -d 2>&1 | Select-Object -Last 1
-        info '已更新到最新版本'
-    } finally { Pop-Location }
+    step '更新到最新版本'
+    if (-not (Invoke-TransactionalUpdate)) { exit 1 }
+}
+
+function cmd-rollback {
+    $script:COMPOSE_CMD = detect-compose
+    if (-not $script:COMPOSE_CMD) { error-msg 'Docker Compose 不可用'; exit 1 }
+    require-config-file
+
+    step '回滚 Docker 镜像'
+    detail $script:ROLLBACK_IMAGE
+    if (-not (Invoke-SavedImageRollback)) { exit 1 }
 }
 
 function cmd-uninstall {
@@ -1511,7 +1723,8 @@ function show-help {
     Write-Host '    backup [文件] 备份配置和 OAuth 凭证' -ForegroundColor Cyan
     Write-Host '    restore <文件> 恢复配置和 OAuth 凭证' -ForegroundColor Cyan
     Write-Host '    check-update  只检查镜像是否有更新' -ForegroundColor Cyan
-    Write-Host '    update       更新到最新版本' -ForegroundColor Cyan
+    Write-Host '    update       更新、健康检查，失败时自动回滚' -ForegroundColor Cyan
+    Write-Host '    rollback     手动切换到上一个镜像版本' -ForegroundColor Cyan
     Write-Host '    uninstall    完全卸载' -ForegroundColor Cyan
     Write-Host '    setup-claude 自动配置 Claude Code 环境' -ForegroundColor Cyan
     Write-Host '    help         显示此帮助' -ForegroundColor Cyan
@@ -1579,6 +1792,7 @@ function main {
         }
         'check-update' { cmd-check-update }
         'update'    { cmd-update @args }
+        'rollback'  { cmd-rollback }
         'uninstall' { cmd-uninstall @args }
         'setup-claude' { cmd-setup-claude }
         'help'      { show-help }

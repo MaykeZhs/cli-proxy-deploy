@@ -18,6 +18,7 @@
 #          bash deploy.sh restore <file> # 恢复配置和凭证
 #          bash deploy.sh check-update # 检查镜像更新
 #          bash deploy.sh update   # 更新到最新版
+#          bash deploy.sh rollback # 回滚到更新前镜像
 #          bash deploy.sh auto-update # 有新镜像时才更新（适合 cron）
 #          bash deploy.sh enable-auto-update [cron] # 启用每日自动更新
 #          bash deploy.sh disable-auto-update # 禁用自动更新
@@ -37,6 +38,7 @@ set -euo pipefail
 readonly VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DOCKER_IMAGE="eceasy/cli-proxy-api:latest"
+readonly ROLLBACK_IMAGE="eceasy/cli-proxy-api:rollback"
 readonly COMPOSE_PROJECT_NAME="cli-proxy-manager"
 export COMPOSE_PROJECT_NAME
 readonly CONTAINER_NAME="cli-proxy-manager"
@@ -45,6 +47,7 @@ readonly OAUTH_PORT=51121
 readonly CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 readonly AUTO_UPDATE_LOG="${SCRIPT_DIR}/logs/auto-update.log"
+readonly FAILED_UPDATE_FILE="${SCRIPT_DIR}/logs/failed-update-digest"
 readonly AUTO_UPDATE_MARKER_BEGIN="# >>> cli-proxy-manager auto-update >>>"
 readonly AUTO_UPDATE_MARKER_END="# <<< cli-proxy-manager auto-update <<<"
 
@@ -278,6 +281,151 @@ get_remote_image_digest() {
 
     docker manifest inspect --verbose "${DOCKER_IMAGE}" 2>/dev/null \
         | awk -F'"' '/"digest"[[:space:]]*:/ { print $4; exit }'
+}
+
+get_image_id() {
+    docker image inspect --format '{{.Id}}' "$1" 2>/dev/null | head -1
+}
+
+save_current_image_for_rollback() {
+    local current_id
+    current_id="$(get_image_id "${DOCKER_IMAGE}" || true)"
+
+    if [[ -z "${current_id}" ]]; then
+        current_id="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+    fi
+
+    if [[ -z "${current_id}" ]]; then
+        warn "未找到当前镜像，无法创建回滚点"
+        return 1
+    fi
+
+    docker image tag "${current_id}" "${ROLLBACK_IMAGE}"
+    info "已保存更新前镜像"
+    detail "回滚镜像: ${ROLLBACK_IMAGE} (${current_id:7:12})"
+}
+
+service_health_check_once() {
+    sync_api_key_from_config
+
+    if [[ -n "${CPA_API_KEY:-}" ]]; then
+        curl -fsS --max-time 5 "http://127.0.0.1:${CPA_PORT}/v1/models" \
+            -H "Authorization: Bearer ${CPA_API_KEY}" >/dev/null
+        return
+    fi
+
+    local http_code
+    http_code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${CPA_PORT}/v1/models" 2>/dev/null || true)"
+    [[ "${http_code}" == "200" || "${http_code}" == "401" ]]
+}
+
+wait_for_service_health() {
+    local attempts="${1:-30}"
+    local delay="${2:-1}"
+
+    for _ in $(seq 1 "${attempts}"); do
+        if service_health_check_once; then
+            return 0
+        fi
+        sleep "${delay}"
+    done
+
+    return 1
+}
+
+recreate_service() {
+    cd "${SCRIPT_DIR}"
+    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d --force-recreate
+}
+
+rollback_saved_image() {
+    local previous_current_id
+    local rollback_id
+
+    previous_current_id="$(get_image_id "${DOCKER_IMAGE}" || true)"
+    rollback_id="$(get_image_id "${ROLLBACK_IMAGE}" || true)"
+
+    if [[ -z "${rollback_id}" ]]; then
+        error "没有可用的回滚镜像"
+        detail "先成功运行一次 update 或 auto-update，脚本才会保存更新前镜像"
+        return 1
+    fi
+
+    if [[ "${previous_current_id}" == "${rollback_id}" ]]; then
+        warn "当前镜像与回滚镜像相同，无需回滚"
+        return 0
+    fi
+
+    docker image tag "${rollback_id}" "${DOCKER_IMAGE}"
+    if [[ -n "${previous_current_id}" ]]; then
+        docker image tag "${previous_current_id}" "${ROLLBACK_IMAGE}"
+    fi
+
+    if ! recreate_service >/dev/null; then
+        error "回滚容器重建失败"
+        if [[ -n "${previous_current_id}" ]]; then
+            docker image tag "${previous_current_id}" "${DOCKER_IMAGE}" >/dev/null
+        fi
+        docker image tag "${rollback_id}" "${ROLLBACK_IMAGE}" >/dev/null
+        recreate_service >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if wait_for_service_health; then
+        info "镜像回滚成功"
+        detail "当前镜像: ${rollback_id:7:12}"
+        return 0
+    fi
+
+    error "回滚后的服务健康检查失败，正在恢复回滚前镜像"
+    if [[ -n "${previous_current_id}" ]]; then
+        docker image tag "${previous_current_id}" "${DOCKER_IMAGE}" >/dev/null
+        docker image tag "${rollback_id}" "${ROLLBACK_IMAGE}" >/dev/null
+        recreate_service >/dev/null 2>&1 || true
+    fi
+    return 1
+}
+
+transactional_update() {
+    local rollback_available=false
+
+    if save_current_image_for_rollback; then
+        rollback_available=true
+    fi
+
+    step "拉取最新镜像"
+    detail "${DOCKER_IMAGE}"
+    if ! docker pull "${DOCKER_IMAGE}" 2>&1 | tail -1; then
+        error "镜像拉取失败；现有服务保持不变"
+        return 1
+    fi
+
+    step "重建并检查服务"
+    if ! recreate_service 2>&1 | tail -1; then
+        error "新容器启动失败"
+        if $rollback_available; then
+            warn "正在自动回滚"
+            rollback_saved_image || true
+        fi
+        return 1
+    fi
+
+    if wait_for_service_health; then
+        info "更新完成，API 健康检查通过"
+        detail "手动回滚: bash deploy.sh rollback"
+        return 0
+    fi
+
+    error "新版本未通过 /v1/models 健康检查"
+    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" logs --tail 30 || true
+    if $rollback_available; then
+        warn "正在自动回滚到更新前镜像"
+        rollback_saved_image || true
+    else
+        error "没有更新前镜像，无法自动回滚"
+    fi
+    return 1
 }
 
 shell_quote() {
@@ -681,7 +829,8 @@ show_result() {
     echo -e "  ${CYAN}bash deploy.sh doctor${NC}     自检诊断"
     echo -e "  ${CYAN}bash deploy.sh backup${NC}     备份配置和 OAuth 凭证"
     echo -e "  ${CYAN}bash deploy.sh check-update${NC} 检查镜像更新"
-    echo -e "  ${CYAN}bash deploy.sh update${NC}     更新到最新版本"
+    echo -e "  ${CYAN}bash deploy.sh update${NC}     安全更新到最新版本"
+    echo -e "  ${CYAN}bash deploy.sh rollback${NC}   回滚到上一个镜像版本"
     echo -e "  ${CYAN}bash deploy.sh login${NC}      重新 OAuth 登录"
     echo -e "  ${CYAN}bash deploy.sh logout${NC}     退出 Provider 账号"
     echo -e "  ${CYAN}bash deploy.sh setup-claude${NC} 自动配置 Claude Code"
@@ -1242,10 +1391,31 @@ cmd_update() {
     require_config_file
 
     step "更新到最新版本"
-    docker pull "${DOCKER_IMAGE}" 2>&1 | tail -1
-    cd "${SCRIPT_DIR}"
-    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d 2>&1 | tail -1
-    info "已更新到最新版本"
+    if transactional_update; then
+        rm -f "${FAILED_UPDATE_FILE}"
+    else
+        return 1
+    fi
+}
+
+cmd_rollback() {
+    COMPOSE_CMD="$(detect_compose)"
+    [[ -z "$COMPOSE_CMD" ]] && { error "Docker Compose 不可用"; exit 1; }
+    require_config_file
+
+    step "回滚 Docker 镜像"
+    detail "${ROLLBACK_IMAGE}"
+    local rejected_digest
+    rejected_digest="$(get_local_image_digest || true)"
+    if rollback_saved_image; then
+        if [[ -n "${rejected_digest}" ]]; then
+            mkdir -p "$(dirname "${FAILED_UPDATE_FILE}")"
+            printf '%s\n' "${rejected_digest}" > "${FAILED_UPDATE_FILE}"
+            detail "自动更新将跳过刚回滚的 digest，直到远端版本变化"
+        fi
+    else
+        return 1
+    fi
 }
 
 cmd_auto_update() {
@@ -1269,6 +1439,17 @@ cmd_auto_update() {
         return 1
     fi
 
+    local failed_digest=""
+    if [[ -f "${FAILED_UPDATE_FILE}" ]]; then
+        failed_digest="$(tr -d '[:space:]' < "${FAILED_UPDATE_FILE}" || true)"
+    fi
+    if [[ -n "${failed_digest}" && "${failed_digest}" == "${remote_digest}" ]]; then
+        warn "远端镜像上次未通过健康检查，本次跳过"
+        detail "失败 digest: ${failed_digest}"
+        detail "远端发布新 digest 后会自动重试；也可手动运行 bash deploy.sh update"
+        return 0
+    fi
+
     local local_digest
     local_digest="$(get_local_image_digest || true)"
     if [[ -n "${local_digest}" && "${local_digest}" == "${remote_digest}" ]]; then
@@ -1285,17 +1466,19 @@ cmd_auto_update() {
         detail "远端: ${remote_digest}"
     fi
 
-    cd "${SCRIPT_DIR}"
-    docker pull "${DOCKER_IMAGE}" 2>&1 | tail -1
-    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d 2>&1 | tail -1
+    if transactional_update; then
+        rm -f "${FAILED_UPDATE_FILE}"
+    else
+        mkdir -p "$(dirname "${FAILED_UPDATE_FILE}")"
+        printf '%s\n' "${remote_digest}" > "${FAILED_UPDATE_FILE}"
+        warn "已记录失败 digest；自动更新将在远端 digest 变化后重试"
+        return 1
+    fi
 
     local updated_digest
     updated_digest="$(get_local_image_digest || true)"
     if [[ -n "${updated_digest}" ]]; then
-        info "自动更新完成"
         detail "当前 digest: ${updated_digest}"
-    else
-        warn "自动更新命令已完成，但未读取到本地镜像 digest"
     fi
 }
 
@@ -1559,7 +1742,8 @@ show_help() {
     echo -e "    ${CYAN}backup [文件]${NC} 备份配置和 OAuth 凭证"
     echo -e "    ${CYAN}restore <文件>${NC} 恢复配置和 OAuth 凭证"
     echo -e "    ${CYAN}check-update${NC}  只检查镜像是否有更新"
-    echo -e "    ${CYAN}update${NC}       更新到最新版本"
+    echo -e "    ${CYAN}update${NC}       更新、健康检查，失败时自动回滚"
+    echo -e "    ${CYAN}rollback${NC}     手动切换到上一个镜像版本"
     echo -e "    ${CYAN}auto-update${NC}  有新镜像时才更新（适合 cron）"
     echo -e "    ${CYAN}enable-auto-update [计划]${NC} 启用自动更新"
     echo -e "    ${CYAN}auto-update-status${NC} 查看自动更新状态"
@@ -1624,6 +1808,7 @@ main() {
         restore)    shift; cmd_restore "${1:-}" ;;
         check-update) cmd_check_update ;;
         update)     cmd_update ;;
+        rollback)   cmd_rollback ;;
         auto-update) cmd_auto_update ;;
         enable-auto-update) shift; cmd_enable_auto_update "${1:-daily}" ;;
         auto-update-status) cmd_auto_update_status ;;

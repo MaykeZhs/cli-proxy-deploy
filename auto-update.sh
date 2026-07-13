@@ -2,7 +2,7 @@
 # =============================================================================
 #
 #   Antigravity Proxy — 自动更新定时任务开关 (auto-update)
-#   通过 cron 定时运行 `deploy.sh update`，让镜像保持最新。
+#   通过 cron 定时运行 `deploy.sh auto-update`，让镜像保持最新。
 #   只有镜像真的有更新时才会重建容器；无更新则为空操作、不会重启。
 #
 #   用法:
@@ -206,12 +206,17 @@ cmd_run() {
     # cron 环境 PATH 很精简，显式补全以保证能找到 docker
     export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
     local dir; dir="$(dirname "$LOG_FILE")"
+    local update_status=0
     [[ -d "$dir" ]] || mkdir -p "$dir" 2>/dev/null || true
     {
         echo "========== $(date '+%Y-%m-%d %H:%M:%S') 自动更新开始 =========="
-        bash "$DEPLOY_SCRIPT" update
-        echo "---- 清理悬空镜像 ----"
-        docker image prune -f
+        if bash "$DEPLOY_SCRIPT" auto-update; then
+            echo "---- 清理悬空镜像（保留 :rollback 镜像）----"
+            docker image prune -f
+        else
+            echo "自动更新失败；如已启动新镜像，deploy.sh 会尝试自动回滚"
+            update_status=1
+        fi
         echo "========== $(date '+%Y-%m-%d %H:%M:%S') 自动更新结束 =========="
         echo ""
     } >> "$LOG_FILE" 2>&1
@@ -219,6 +224,7 @@ cmd_run() {
     if [[ -f "$LOG_FILE" ]]; then
         tail -n 2000 "$LOG_FILE" > "${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE" 2>/dev/null || true
     fi
+    return "${update_status}"
 }
 
 show_help() {

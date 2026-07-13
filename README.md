@@ -463,6 +463,7 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 恢复配置和凭证 / Restore config and credentials | `bash deploy.sh restore <file>` | `.\deploy.ps1 restore <file>` |
 | 检查镜像更新 / Check image update | `bash deploy.sh check-update` | `.\deploy.ps1 check-update` |
 | 更新到最新版 / Update to latest | `bash deploy.sh update` | `.\deploy.ps1 update` |
+| 回滚到上一个镜像 / Roll back image | `bash deploy.sh rollback` | `.\deploy.ps1 rollback` |
 | 有新镜像时才更新 / Update only if needed | `bash deploy.sh auto-update` | — |
 | 启用自动更新 / Enable auto-update | `bash deploy.sh enable-auto-update [计划]` | — |
 | 查看自动更新状态 / Auto-update status | `bash deploy.sh auto-update-status` | — |
@@ -483,8 +484,11 @@ Use `check-update` to compare the remote image digest without downloading image 
 # Check metadata only; no image layers are downloaded
 bash deploy.sh check-update
 
-# Pull the latest image and recreate the service
+# Save the current image, pull latest, recreate, and run a health check
 bash deploy.sh update
+
+# Switch to the image saved before the last update
+bash deploy.sh rollback
 
 # Cron-safe update: only pulls and recreates when the remote image digest changed
 bash deploy.sh auto-update
@@ -508,6 +512,12 @@ bash deploy.sh disable-auto-update
 bash deploy.sh status
 ```
 
+`update` and `auto-update` first tag the currently running image as `eceasy/cli-proxy-api:rollback`. After the new container starts, they require `/v1/models` to respond successfully. If startup or the health check fails, the script automatically restores the saved image and recreates the container. The rollback tag is not removed by `docker image prune`.
+
+When `auto-update` rejects an image, it records that remote digest and skips it on later scheduled runs. On Linux/macOS, a manual `rollback` also marks the image being left. The updater tries again automatically after the publisher provides a different digest. A manual `update` still lets an operator retry immediately.
+
+`rollback` manually swaps the current and saved images, recreates the service, and runs the same health check. Because the two image tags are swapped, running `rollback` again switches back. Only one previous image is kept; configuration and OAuth credential data are not changed.
+
 `auto-update` is designed for cron. It compares the local and remote Docker image digest first. If they match, it exits without pulling, recreating, or restarting the container. `enable-auto-update` accepts schedule aliases (`daily`, `12h`, `6h`, `hourly`, `weekly`) or a custom 5-field cron expression, and writes a marked crontab block so running it again safely replaces the previous schedule without touching your other cron jobs. Use `auto-update-status` to view the current schedule and recent logs.
 
 The scheduling commands, `enable-auto-update` and `disable-auto-update`, are Linux/macOS only because they use `crontab`.
@@ -518,8 +528,11 @@ The scheduling commands, `enable-auto-update` and `disable-auto-update`, are Lin
 # Check metadata only; no image layers are downloaded
 .\deploy.ps1 check-update
 
-# Pull the latest image and recreate the service
+# Save the current image, pull latest, recreate, and run a health check
 .\deploy.ps1 update
+
+# Switch to the image saved before the last update
+.\deploy.ps1 rollback
 
 # Verify the updated service is running
 .\deploy.ps1 status
