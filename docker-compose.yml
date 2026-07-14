@@ -6,8 +6,10 @@ name: cli-proxy-manager
 
 services:
   cliproxyapi:
-    image: eceasy/cli-proxy-api:latest
+    image: ${CPA_IMAGE:-eceasy/cli-proxy-api:latest}
+    pull_policy: ${CPA_PULL_POLICY:-always}
     container_name: cli-proxy-manager
+
     restart: unless-stopped
     ports:
       - "${CPA_BIND_HOST:-127.0.0.1}:${CPA_PORT:-8317}:8317"

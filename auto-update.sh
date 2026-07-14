@@ -32,7 +32,8 @@ readonly DEPLOY_SCRIPT="${SCRIPT_DIR}/deploy.sh"
 readonly SELF="${SCRIPT_DIR}/auto-update.sh"
 readonly LOG_FILE="${CPA_UPDATE_LOG:-/var/log/cpa-update.log}"
 readonly CRON_MARKER="# antigravity-proxy-auto-update"
-readonly DOCKER_IMAGE="eceasy/cli-proxy-api:latest"
+readonly DOCKER_IMAGE="${CPA_IMAGE:-eceasy/cli-proxy-api:latest}"
+
 
 # ========================== 颜色 & 日志 ======================================
 

@@ -37,8 +37,9 @@ set -euo pipefail
 
 readonly VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly DOCKER_IMAGE="eceasy/cli-proxy-api:latest"
+DOCKER_IMAGE="${CPA_IMAGE:-eceasy/cli-proxy-api:latest}"
 readonly ROLLBACK_IMAGE="eceasy/cli-proxy-api:rollback"
+
 readonly COMPOSE_PROJECT_NAME="cli-proxy-manager"
 export COMPOSE_PROJECT_NAME
 readonly CONTAINER_NAME="cli-proxy-manager"
@@ -336,8 +337,10 @@ wait_for_service_health() {
 
 recreate_service() {
     cd "${SCRIPT_DIR}"
-    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d --force-recreate
+    CPA_PORT="${CPA_PORT}" CPA_IMAGE="${DOCKER_IMAGE}" CPA_PULL_POLICY=never \
+        $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d --force-recreate
 }
+
 
 rollback_saved_image() {
     local previous_current_id
@@ -748,8 +751,10 @@ start_service() {
         fi
     fi
 
-    # 启动
-    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d 2>&1 | tail -1
+    # 镜像已在停止旧容器前拉取，避免 Compose 重复访问仓库
+    CPA_PORT="${CPA_PORT}" CPA_IMAGE="${DOCKER_IMAGE}" CPA_PULL_POLICY=never \
+        $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d 2>&1 | tail -1
+
 
     # 等待就绪
     echo -en "     等待服务就绪 "
@@ -864,9 +869,9 @@ cmd_deploy() {
     fi
 
     config_wizard
-    pull_image
 
     echo ""
+
     echo -e "  ${BOLD}选择要登录的 Provider${NC}"
     echo -e "  ${DIM}(CLIProxyAPI 支持多种 Provider，可后续追加)${NC}"
     echo ""
@@ -1820,7 +1825,10 @@ main() {
         done < "${SCRIPT_DIR}/.env"
     fi
 
+    DOCKER_IMAGE="${CPA_IMAGE:-eceasy/cli-proxy-api:latest}"
+
     case "${1:-}" in
+
         login)      cmd_login ;;
         logout)     cmd_logout ;;
         start)      cmd_start ;;

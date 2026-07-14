@@ -33,5 +33,6 @@ tmp/
 # IDE
 .vscode/
 .idea/
+.playwright-mcp/
 .claude/*
 !.claude/settings.json

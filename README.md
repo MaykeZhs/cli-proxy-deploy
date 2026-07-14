@@ -589,7 +589,11 @@ cp .env.example .env
 |---|---|---|
 | `CPA_BIND_HOST` | `127.0.0.1` | 监听地址。本机使用保持默认；云服务器需外部访问时改为 `0.0.0.0` / Bind address. Keep default for local; set `0.0.0.0` to expose on cloud servers |
 | `CPA_PORT` | `8317` | 服务端口 / Service port |
+| `CPA_IMAGE` | `eceasy/cli-proxy-api:latest` | 容器镜像；Docker Hub 不可用时可改为可信镜像代理 / Container image; may use a trusted registry proxy when Docker Hub is unavailable |
+| `CPA_PULL_POLICY` | `always` | 直接运行 Compose 时检查并拉取镜像；部署脚本会先显式拉取，成功后以 `never` 启动，事务更新和回滚也使用 `never` / Direct Compose starts pull first; deploy scripts explicitly pull before starting with `never`, and transactional update/rollback also use `never` |
+
 | `CPA_API_KEY` | *(auto-generated)* | API 密钥 / API key |
+
 | `CPA_MANAGEMENT_KEY` | *(auto-generated)* | 管理面板密码 / Management panel password |
 
 > **注意 / Note:** `CPA_API_KEY` 和 `CPA_MANAGEMENT_KEY` 仅在配置向导生成 `config.yaml` 时写入。如果 `config.yaml` 已存在，修改 `.env` 中的这两个值不会自动更新配置文件，需要手动编辑 `config.yaml` 或重新运行完整部署。

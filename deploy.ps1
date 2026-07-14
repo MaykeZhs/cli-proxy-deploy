@@ -30,8 +30,9 @@ $ErrorActionPreference = 'Stop'
 
 $script:VERSION        = '1.0.0'
 $script:SCRIPT_DIR     = $PSScriptRoot
-$script:DOCKER_IMAGE   = 'eceasy/cli-proxy-api:latest'
+$script:DOCKER_IMAGE   = if ($env:CPA_IMAGE) { $env:CPA_IMAGE } else { 'eceasy/cli-proxy-api:latest' }
 $script:ROLLBACK_IMAGE = 'eceasy/cli-proxy-api:rollback'
+
 $script:COMPOSE_PROJECT_NAME = 'cli-proxy-manager'
 $env:COMPOSE_PROJECT_NAME    = $script:COMPOSE_PROJECT_NAME
 $script:CONTAINER_NAME = 'cli-proxy-manager'
@@ -421,8 +422,14 @@ function Invoke-ServiceRecreate {
             $PSNativeCommandUseErrorActionPreference = $false
         }
         $env:CPA_PORT = $script:CPA_PORT
+        $env:CPA_IMAGE = $script:DOCKER_IMAGE
+        $previousPullPolicy = $env:CPA_PULL_POLICY
+        $env:CPA_PULL_POLICY = 'never'
         $output = Invoke-Compose -f $script:COMPOSE_FILE up -d --force-recreate 2>&1
         $composeExitCode = $LASTEXITCODE
+        if ($null -eq $previousPullPolicy) { Remove-Item Env:CPA_PULL_POLICY -ErrorAction SilentlyContinue }
+        else { $env:CPA_PULL_POLICY = $previousPullPolicy }
+
         if ($output) { detail ([string]($output | Select-Object -Last 1)) }
         return $composeExitCode -eq 0
     } catch {
@@ -694,8 +701,9 @@ function pull-image {
 
     $hasLocalImage = Test-DockerImageExists $script:DOCKER_IMAGE
     if ($hasLocalImage) {
-        detail '检测到本地镜像；如果拉取失败，将使用本地缓存继续'
+        detail '检测到本地镜像；仍会连接仓库确认并拉取目标镜像'
     }
+
 
     $pullOutput = @()
     $pullExitCode = 1
@@ -718,20 +726,19 @@ function pull-image {
 
     if ($pullExitCode -eq 0) {
         info '镜像已就绪'
-    } elseif ($hasLocalImage -or (Test-DockerImageExists $script:DOCKER_IMAGE)) {
-        warn '镜像拉取失败，使用本地缓存镜像继续'
-        $pullOutput |
-            Where-Object { $_ } |
-            Select-Object -Last 3 |
-            ForEach-Object { detail $_ }
-    } else {
-        error-msg '镜像拉取失败，请检查网络'
-        $pullOutput |
-            Where-Object { $_ } |
-            Select-Object -Last 3 |
-            ForEach-Object { detail $_ }
-        exit 1
+        return
     }
+
+    error-msg '镜像拉取失败；未使用本地缓存冒充最新版本'
+    $pullOutput |
+        Where-Object { $_ } |
+        Select-Object -Last 3 |
+        ForEach-Object { detail $_ }
+    if ($hasLocalImage -or (Test-DockerImageExists $script:DOCKER_IMAGE)) {
+        detail '本地缓存仍保留，可在修复网络后重试，或显式设置 CPA_PULL_POLICY=never'
+    }
+    exit 1
+
 }
 
 function do-login($provider = 'antigravity') {
@@ -867,8 +874,10 @@ function start-service {
 
     require-config-file
     Sync-ApiKeyFromConfig
+    pull-image
 
     Push-Location $script:SCRIPT_DIR
+
 
     try {
         # 停止已有容器
@@ -884,9 +893,18 @@ function start-service {
             }
         }
 
-        # 启动
+        # 镜像已在停止旧容器前拉取，避免 Compose 重复访问仓库
         $env:CPA_PORT = $script:CPA_PORT
-        $upResult = Invoke-Compose -f $script:COMPOSE_FILE up -d 2>&1 | Select-Object -Last 1
+        $env:CPA_IMAGE = $script:DOCKER_IMAGE
+        $previousPullPolicy = $env:CPA_PULL_POLICY
+        $env:CPA_PULL_POLICY = 'never'
+        try {
+            $upResult = Invoke-Compose -f $script:COMPOSE_FILE up -d 2>&1 | Select-Object -Last 1
+        } finally {
+            if ($null -eq $previousPullPolicy) { Remove-Item Env:CPA_PULL_POLICY -ErrorAction SilentlyContinue }
+            else { $env:CPA_PULL_POLICY = $previousPullPolicy }
+        }
+
 
         # 等待就绪
         Write-Host '     等待服务就绪 ' -NoNewline
@@ -1010,9 +1028,9 @@ function cmd-deploy {
     }
 
     config-wizard
-    pull-image
 
     Write-Host ''
+
     Write-Host '  选择要登录的 Provider' -ForegroundColor White
     Write-Host '  (CLIProxyAPI 支持多种 Provider，可后续追加)' -ForegroundColor DarkGray
     Write-Host ''
@@ -1765,6 +1783,8 @@ function main {
                         'CPA_PORT'           { $script:CPA_PORT = $val }
                         'CPA_API_KEY'        { $script:CPA_API_KEY = $val }
                         'CPA_MANAGEMENT_KEY' { $script:CPA_MANAGEMENT_KEY = $val }
+                        'CPA_IMAGE'          { $script:DOCKER_IMAGE = $val }
+
                     }
                 }
             }
