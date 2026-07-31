@@ -13,6 +13,7 @@
 #          .\deploy.ps1 stop     # 停止服务
 #          .\deploy.ps1 status   # 查看状态
 #          .\deploy.ps1 logs     # 实时日志
+#          .\deploy.ps1 capabilities [--json] # 只读能力检查
 #          .\deploy.ps1 doctor   # 自检诊断
 #          .\deploy.ps1 backup   # 备份配置和凭证
 #          .\deploy.ps1 restore <file> # 恢复配置和凭证
@@ -21,6 +22,7 @@
 #          .\deploy.ps1 rollback # 回滚到更新前镜像
 #          .\deploy.ps1 uninstall # 完全卸载
 #          .\deploy.ps1 setup-claude # 配置 Claude Code
+#          .\deploy.ps1 sub2api deploy # 一键部署 Sub2API
 #
 # =============================================================================
 
@@ -32,6 +34,10 @@ $script:VERSION        = '1.0.0'
 $script:SCRIPT_DIR     = $PSScriptRoot
 $script:DOCKER_IMAGE   = if ($env:CPA_IMAGE) { $env:CPA_IMAGE } else { 'eceasy/cli-proxy-api:latest' }
 $script:ROLLBACK_IMAGE = 'eceasy/cli-proxy-api:rollback'
+$script:RELEASE_CONTRACT_CPA_VERSION = 'v7.2.111'
+$script:RELEASE_CONTRACT_CPA_COMMIT = '4a315136730baa8b3a436d12b74e5a702c70be5c'
+$script:RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION = 'v1.20.4'
+$script:RELEASE_CONTRACT_MANAGEMENT_CENTER_COMMIT = '826ea3c0d0bdd6409a0a2703ada90faaf5aede2d'
 
 $script:COMPOSE_PROJECT_NAME = 'cli-proxy-manager'
 $env:COMPOSE_PROJECT_NAME    = $script:COMPOSE_PROJECT_NAME
@@ -39,13 +45,22 @@ $script:CONTAINER_NAME = 'cli-proxy-manager'
 $script:AUTH_VOLUME    = 'cli-proxy-manager-auth'
 $script:OAUTH_PORT     = 51121
 $script:CONFIG_FILE    = Join-Path $script:SCRIPT_DIR 'config.yaml'
-$script:COMPOSE_FILE   = Join-Path $script:SCRIPT_DIR 'docker-compose.yml'
+$script:COMPOSE_FILE            = Join-Path $script:SCRIPT_DIR 'docker-compose.yml'
+$script:SUB2API_COMPOSE_FILE     = Join-Path $script:SCRIPT_DIR 'docker-compose.sub2api.yml'
+$script:SUB2API_ENV_FILE         = Join-Path $script:SCRIPT_DIR 'sub2api.env'
+$script:SUB2API_ENV_EXAMPLE_FILE = Join-Path $script:SCRIPT_DIR 'sub2api.env.example'
+$script:SUB2API_PROJECT_NAME     = 'sub2api-manager'
+$script:SUB2API_CONTAINER_NAME   = 'sub2api-manager'
+$script:SUB2API_POSTGRES_CONTAINER_NAME = 'sub2api-manager-postgres'
+$script:SUB2API_REDIS_CONTAINER_NAME    = 'sub2api-manager-redis'
 
 # 用户可配置（在 .env 中覆盖）
 $script:CPA_PORT           = if ($env:CPA_PORT)           { $env:CPA_PORT }           else { '8317' }
 $script:CPA_API_KEY        = if ($env:CPA_API_KEY)        { $env:CPA_API_KEY }        else { '' }
 $script:CPA_MANAGEMENT_KEY = if ($env:CPA_MANAGEMENT_KEY) { $env:CPA_MANAGEMENT_KEY } else { '' }
 $script:CPA_API_KEYS       = @()
+$script:SUB2API_ENV_CREATED = $false
+$script:SUB2API_NEW_ADMIN_PASSWORD = ''
 
 # ========================== 颜色 & 样式 ======================================
 
@@ -118,13 +133,42 @@ function detect-compose {
     return ''
 }
 
+function Invoke-NativeChecked($file, [string[]]$arguments, $capture = $false) {
+    if ($capture) { $output = & $file @arguments 2>&1 } else { & $file @arguments; $output = $null }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "Native command failed ($exitCode): $file $($arguments -join ' ')" }
+    return $output
+}
+
 function Invoke-Compose {
     $cmdParts = $script:COMPOSE_CMD -split '\s+'
-    if ($cmdParts.Count -gt 1) {
-        & $cmdParts[0] $cmdParts[1] @args
-    } else {
-        & $cmdParts[0] @args
+    $allArgs = @()
+    if ($cmdParts.Count -gt 1) { $allArgs += $cmdParts[1] }
+    $allArgs += $args
+    Invoke-NativeChecked $cmdParts[0] $allArgs
+}
+
+function Assert-SafeRepoPath($path, $allowMissing = $false) {
+    $root = [IO.Path]::GetFullPath($script:SCRIPT_DIR).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($path)
+    if (-not ($full -eq $root -or $full.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase))) { throw "路径超出仓库根目录: $path" }
+    $relative = $full.Substring($root.Length).TrimStart('\')
+    $current = $root
+    foreach ($component in ($relative -split '\\')) {
+        if (-not $component) { continue }
+        $current = Join-Path $current $component
+        if (Test-Path $current) {
+            $item = Get-Item $current -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "拒绝 reparse point: $current" }
+        }
     }
+    if (-not $allowMissing -and -not (Test-Path $full)) { throw "路径不存在: $full" }
+}
+
+function Assert-RegularFile($path) {
+    Assert-SafeRepoPath $path
+    $item = Get-Item $path -Force
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "要求普通文件: $path" }
 }
 
 function check-prereqs {
@@ -264,6 +308,1196 @@ function Sync-ApiKeyFromConfig {
         if ($keys.Count -gt 0) {
             $script:CPA_API_KEY = $keys[0]
         }
+    }
+}
+
+# ========================== CPA 只读能力探针 =================================
+
+function Invoke-ReadOnlyNative {
+    param(
+        [Parameter(Mandatory = $true)][string]$File,
+        [string[]]$Arguments = @()
+    )
+
+    $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
+    try {
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $output = @(& $File @Arguments 2>&1)
+        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Output = @($output | ForEach-Object { $_.ToString() })
+        }
+    } catch {
+        return [pscustomobject]@{
+            ExitCode = 1
+            Output = @()
+        }
+    } finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+    }
+}
+
+function ConvertTo-CapabilityBoolean($value) {
+    if ($null -eq $value) { return $null }
+    switch ($value.ToString().Trim().ToLowerInvariant()) {
+        { $_ -in @('true', 'yes', 'on', '1') } { return $true }
+        { $_ -in @('false', 'no', 'off', '0') } { return $false }
+        default { return $null }
+    }
+}
+
+function Test-CapabilityLoopback($address) {
+    if (-not $address) { return $false }
+    $normalized = $address.ToString().Trim().Trim('[', ']')
+    return ($normalized -eq 'localhost' -or $normalized -eq '::1' -or
+        $normalized -eq '0:0:0:0:0:0:0:1' -or $normalized.StartsWith('127.'))
+}
+
+function Get-CapabilityYamlValue($value) {
+    if ($null -eq $value) { return '' }
+    $result = $value.ToString() -replace '\s+#.*$', ''
+    $result = $result.Trim()
+    if ($result.Length -ge 2) {
+        if (($result.StartsWith('"') -and $result.EndsWith('"')) -or
+            ($result.StartsWith("'") -and $result.EndsWith("'"))) {
+            $result = $result.Substring(1, $result.Length - 2)
+        }
+    }
+    return $result
+}
+
+function Get-RemoteManagementCapability {
+    $result = [ordered]@{
+        configured = $false
+        allow_remote = $null
+        control_panel_disabled = $null
+        secret_configured = $null
+    }
+    if (-not (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        return [pscustomobject]$result
+    }
+
+    $inRemote = $false
+    foreach ($line in Get-Content $script:CONFIG_FILE) {
+        if ($line -match '^remote-management:\s*(?:#.*)?$') {
+            $inRemote = $true
+            $result.configured = $true
+            continue
+        }
+        if ($inRemote -and $line -match '^\S' -and $line -notmatch '^#') {
+            break
+        }
+        if (-not $inRemote) { continue }
+
+        if ($line -match '^\s+allow-remote:\s*(.*)$') {
+            $result.allow_remote = ConvertTo-CapabilityBoolean (Get-CapabilityYamlValue $Matches[1])
+        } elseif ($line -match '^\s+disable-control-panel:\s*(.*)$') {
+            $result.control_panel_disabled = ConvertTo-CapabilityBoolean (Get-CapabilityYamlValue $Matches[1])
+        } elseif ($line -match '^\s+secret-key:\s*(.*)$') {
+            $secretValue = Get-CapabilityYamlValue $Matches[1]
+            $result.secret_configured = [bool]$secretValue
+        }
+    }
+    return [pscustomobject]$result
+}
+
+function Get-RoutingConfigCapability {
+    $result = [ordered]@{
+        strategy = $null
+        session_affinity_enabled = $null
+        session_affinity_ttl = $null
+    }
+    if (-not (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        return [pscustomobject]$result
+    }
+
+    $result.strategy = 'round-robin'
+    $result.session_affinity_enabled = $false
+    $result.session_affinity_ttl = '1h'
+
+    $inRouting = $false
+    foreach ($line in Get-Content $script:CONFIG_FILE) {
+        if ($line -match '^routing:\s*(?:#.*)?$') {
+            $inRouting = $true
+            continue
+        }
+        if ($inRouting -and $line -match '^\S' -and $line -notmatch '^#') {
+            break
+        }
+        if (-not $inRouting) { continue }
+
+        if ($line -match '^\s+strategy:\s*(.*)$') {
+            $strategy = Get-CapabilityYamlValue $Matches[1]
+            $result.strategy = if ($strategy -in @('round-robin', 'weighted-round-robin', 'fill-first')) { $strategy } else { $null }
+        } elseif ($line -match '^\s+session-affinity:\s*(.*)$') {
+            $result.session_affinity_enabled = ConvertTo-CapabilityBoolean (Get-CapabilityYamlValue $Matches[1])
+        } elseif ($line -match '^\s+session-affinity-ttl:\s*(.*)$') {
+            $ttl = Get-CapabilityYamlValue $Matches[1]
+            $result.session_affinity_ttl = if ($ttl -match '^(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|ms|s|m|h))+$') { $ttl } else { $null }
+        }
+    }
+    return [pscustomobject]$result
+}
+
+function Get-PluginConfigCapability {
+    $result = [ordered]@{
+        section_present = $false
+        configured = $false
+        enabled = $null
+    }
+    if (-not (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        return [pscustomobject]$result
+    }
+
+    $inPlugins = $false
+    foreach ($line in Get-Content $script:CONFIG_FILE) {
+        if ($line -match '^plugins:\s*(?:#.*)?$') {
+            $inPlugins = $true
+            $result.section_present = $true
+            $result.configured = $true
+            continue
+        }
+        if ($inPlugins -and $line -match '^\S' -and $line -notmatch '^#') {
+            break
+        }
+        if (-not $inPlugins) { continue }
+        if ($line -match '^\s+enabled:\s*(.*)$') {
+            $result.enabled = ConvertTo-CapabilityBoolean (Get-CapabilityYamlValue $Matches[1])
+        }
+    }
+    return [pscustomobject]$result
+}
+
+function Select-CapabilityBinding([string[]]$lines) {
+    $selected = $null
+    $selectedPriority = 0
+    foreach ($rawLine in $lines) {
+        $line = $rawLine.ToString().Trim()
+        if (-not $line) { continue }
+        $address = $null
+        $port = $null
+        if ($line -match '^\[(.*)\]:(\d+)$') {
+            $address = $Matches[1]
+            $port = [int]$Matches[2]
+        } elseif ($line -match '^(.*):(\d+)$') {
+            $address = $Matches[1]
+            $port = [int]$Matches[2]
+        }
+        if (-not $address -or $null -eq $port) { continue }
+
+        if ($address -eq '0.0.0.0') { $priority = 4 }
+        elseif ($address -eq '::') { $priority = 3 }
+        elseif (Test-CapabilityLoopback $address) { $priority = 1 }
+        else { $priority = 2 }
+
+        if ($priority -gt $selectedPriority) {
+            $selected = [pscustomobject]@{ Address = $address; Port = $port }
+            $selectedPriority = $priority
+        }
+    }
+    return $selected
+}
+
+function Get-CapabilityProbeHost($address) {
+    if (-not $address -or $address -eq '0.0.0.0') { return '127.0.0.1' }
+    $normalized = $address.ToString().Trim().Trim('[', ']')
+    if ($normalized -eq '::') { return '[::1]' }
+    if ($normalized.Contains(':')) { return "[$normalized]" }
+    return $normalized
+}
+
+function Get-CapabilityHeaderValue($headers, $name) {
+    if ($null -eq $headers) { return $null }
+    try {
+        $value = $headers[$name]
+        if ($value) { return (@($value) | Select-Object -First 1).ToString().Trim() }
+    } catch { }
+    try {
+        $values = @($headers.GetValues($name))
+        if ($values.Count -gt 0) { return $values[0].ToString().Trim() }
+    } catch { }
+    return $null
+}
+
+function Invoke-CapabilityWebRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [hashtable]$Headers = @{}
+    )
+
+    try {
+        $response = Invoke-WebRequest -Uri $Uri -Headers $Headers -UseBasicParsing `
+            -TimeoutSec 5 -ErrorAction Stop
+        return [pscustomobject]@{
+            StatusCode = [int]$response.StatusCode
+            Content = $response.Content
+            Headers = $response.Headers
+        }
+    } catch {
+        $response = $_.Exception.Response
+        $statusCode = $null
+        $responseHeaders = $null
+        if ($response) {
+            try { $statusCode = [int]$response.StatusCode } catch { }
+            try { $responseHeaders = $response.Headers } catch { }
+        }
+        return [pscustomobject]@{
+            StatusCode = $statusCode
+            Content = ''
+            Headers = $responseHeaders
+        }
+    }
+}
+
+function New-ProviderCredentialCapability {
+    $providers = [ordered]@{
+        antigravity = $null
+        claude = $null
+        codex = $null
+        gemini = $null
+        kimi = $null
+        xai = $null
+        unknown = $null
+    }
+    return [pscustomobject][ordered]@{
+        inspection = $null
+        source = $null
+        providers = [pscustomobject]$providers
+        additional_providers = @()
+        total = $null
+    }
+}
+
+function Get-ProviderCredentialFallbackCapability($containerRunning) {
+    $result = New-ProviderCredentialCapability
+    if ($containerRunning -ne $true) { return [pscustomobject]$result }
+    $providers = [ordered]@{
+        antigravity = $null
+        claude = $null
+        codex = $null
+        gemini = $null
+        kimi = $null
+        xai = $null
+        unknown = $null
+    }
+
+    $providerScript = 'auth=/root/.cli-proxy-api; [ -d "$auth" ] || exit 2; antigravity=$(find "$auth" -maxdepth 1 -type f \( -name "antigravity.json" -o -name "antigravity-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]"); claude=$(find "$auth" -maxdepth 1 -type f \( -name "claude.json" -o -name "claude-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]"); codex=$(find "$auth" -maxdepth 1 -type f \( -name "codex.json" -o -name "codex-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]"); gemini=$(find "$auth" -maxdepth 1 -type f \( -name "gemini.json" -o -name "gemini-*.json" -o -name "geminicli.json" -o -name "geminicli-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]"); kimi=$(find "$auth" -maxdepth 1 -type f \( -name "kimi.json" -o -name "kimi-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]"); xai=$(find "$auth" -maxdepth 1 -type f \( -name "xai.json" -o -name "xai-*.json" -o -name "x-ai.json" -o -name "x-ai-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]"); all=$(find "$auth" -maxdepth 1 -type f -name "*.json" 2>/dev/null | wc -l | tr -d "[:space:]"); printf "antigravity=%s\nclaude=%s\ncodex=%s\ngemini=%s\nkimi=%s\nxai=%s\nall=%s\n" "${antigravity:-0}" "${claude:-0}" "${codex:-0}" "${gemini:-0}" "${kimi:-0}" "${xai:-0}" "${all:-0}"'
+    $native = Invoke-ReadOnlyNative -File 'docker' -Arguments @('exec', $script:CONTAINER_NAME, 'sh', '-c', $providerScript)
+    if ($native.ExitCode -ne 0) { return [pscustomobject]$result }
+
+    $seen = 0
+    $knownTotal = 0
+    $allCount = $null
+    foreach ($line in $native.Output) {
+        if ($line -notmatch '^(antigravity|claude|codex|gemini|kimi|xai|all)=(\d+)$') { continue }
+        $provider = $Matches[1]
+        $count = [int]$Matches[2]
+        if ($provider -eq 'all') {
+            $allCount = $count
+            continue
+        }
+        $providers[$provider] = $count
+        $knownTotal += $count
+        $seen++
+    }
+    if ($seen -eq 6 -and $null -ne $allCount) {
+        $providers.unknown = [Math]::Max(0, $allCount - $knownTotal)
+        $result.inspection = 'available'
+        $result.source = 'filename_fallback'
+        $result.providers = [pscustomobject]$providers
+        $result.total = $allCount
+    }
+    return [pscustomobject]$result
+}
+
+function ConvertFrom-AuthFilesCapability($content) {
+    try {
+        $payload = $content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if (-not ($payload.PSObject.Properties.Name -contains 'files')) { return $null }
+
+    $providers = [ordered]@{
+        antigravity = 0
+        claude = 0
+        codex = 0
+        gemini = 0
+        kimi = 0
+        xai = 0
+        unknown = 0
+    }
+    $additional = [ordered]@{}
+    $statusSupported = $false
+    $prioritySupported = $false
+    $weightConfigured = $false
+    $files = @($payload.files)
+    foreach ($item in $files) {
+        if ($null -eq $item) {
+            $providers.unknown++
+            continue
+        }
+        $propertyNames = @($item.PSObject.Properties.Name)
+        if ($propertyNames -contains 'status' -or $propertyNames -contains 'status_message') { $statusSupported = $true }
+        if ($propertyNames -contains 'priority') { $prioritySupported = $true }
+        if ($propertyNames -contains 'weight') { $weightConfigured = $true }
+        $rawProvider = if ($propertyNames -contains 'type' -and $item.type) { $item.type }
+            elseif ($propertyNames -contains 'provider' -and $item.provider) { $item.provider }
+            else { $null }
+        if (-not ($rawProvider -is [string])) {
+            $providers.unknown++
+            continue
+        }
+        $provider = $rawProvider.Trim().ToLowerInvariant()
+        switch ($provider) {
+            'gemini-cli' { $provider = 'gemini' }
+            'geminicli' { $provider = 'gemini' }
+            'x-ai' { $provider = 'xai' }
+            'x_ai' { $provider = 'xai' }
+        }
+        if ($providers.Contains($provider) -and $provider -ne 'unknown') {
+            $providers[$provider]++
+        } elseif ($provider -match '^[a-z][a-z0-9_-]{0,31}$') {
+            if (-not $additional.Contains($provider)) { $additional[$provider] = 0 }
+            $additional[$provider]++
+        } else {
+            $providers.unknown++
+        }
+    }
+    $additionalItems = @($additional.Keys | Sort-Object | ForEach-Object {
+        [pscustomobject][ordered]@{ type = $_; count = [int]$additional[$_] }
+    })
+    return [pscustomobject][ordered]@{
+        credentials = [pscustomobject][ordered]@{
+            inspection = 'available'
+            source = 'management_api'
+            providers = [pscustomobject]$providers
+            additional_providers = $additionalItems
+            total = $files.Count
+        }
+        status_supported = $statusSupported
+        priority_supported = $prioritySupported
+        priority_configured = $prioritySupported
+        weight_configured = $weightConfigured
+    }
+}
+
+function ConvertFrom-ManagementConfigCapability($content) {
+    try {
+        $payload = $content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if ($null -eq $payload) { return $null }
+
+    $priorityConfigured = $false
+    $weightConfigured = $false
+    foreach ($section in @(
+        'gemini-api-key',
+        'interactions-api-key',
+        'claude-api-key',
+        'vertex-api-key',
+        'codex-api-key',
+        'xai-api-key'
+    )) {
+        if ($payload.PSObject.Properties.Name -notcontains $section) { continue }
+        foreach ($entry in @($payload.$section)) {
+            if ($null -eq $entry) { continue }
+            $propertyNames = @($entry.PSObject.Properties.Name)
+            if ($propertyNames -contains 'priority') { $priorityConfigured = $true }
+            if ($propertyNames -contains 'weight') { $weightConfigured = $true }
+        }
+    }
+
+    if ($payload.PSObject.Properties.Name -contains 'openai-compatibility') {
+        foreach ($provider in @($payload.'openai-compatibility')) {
+            if ($null -eq $provider) { continue }
+            $providerProperties = @($provider.PSObject.Properties.Name)
+            if ($providerProperties -contains 'priority') { $priorityConfigured = $true }
+            if ($providerProperties -notcontains 'api-key-entries') { continue }
+            foreach ($entry in @($provider.'api-key-entries')) {
+                if ($null -ne $entry -and $entry.PSObject.Properties.Name -contains 'weight') {
+                    $weightConfigured = $true
+                }
+            }
+        }
+    }
+
+    $strategy = 'round-robin'
+    $sessionAffinityEnabled = $false
+    $sessionAffinityTtl = '1h'
+    if ($payload.PSObject.Properties.Name -contains 'routing' -and $null -ne $payload.routing) {
+        $routingProperties = @($payload.routing.PSObject.Properties.Name)
+        if ($routingProperties -contains 'strategy') {
+            $candidate = $payload.routing.strategy
+            $strategy = if ($candidate -in @('round-robin', 'weighted-round-robin', 'fill-first')) { $candidate } else { $null }
+        }
+        if ($routingProperties -contains 'session-affinity') {
+            $candidate = $payload.routing.'session-affinity'
+            $sessionAffinityEnabled = if ($candidate -is [bool]) { $candidate } else { $null }
+        }
+        if ($routingProperties -contains 'session-affinity-ttl') {
+            $candidate = $payload.routing.'session-affinity-ttl'
+            $sessionAffinityTtl = if ($candidate -is [string] -and $candidate -match '^(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|ms|s|m|h))+$') { $candidate } else { $null }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        priority_configured = $priorityConfigured
+        weight_configured = $weightConfigured
+        strategy = $strategy
+        session_affinity_enabled = $sessionAffinityEnabled
+        session_affinity_ttl = $sessionAffinityTtl
+    }
+}
+
+function ConvertFrom-RoutingStrategyCapability($content) {
+    try {
+        $payload = $content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if ($null -eq $payload -or $payload.PSObject.Properties.Name -notcontains 'strategy') { return $null }
+    if ($payload.strategy -notin @('round-robin', 'weighted-round-robin', 'fill-first')) { return $null }
+    return $payload.strategy
+}
+
+function ConvertFrom-ManagementCenterVersion($content) {
+    if (-not ($content -is [string]) -or -not $content) { return $null }
+    $pattern = 'footer\.version.{0,300}?tileValue.{0,160}?children:\s*[`"](?<version>v[0-9]+\.[0-9]+\.[0-9]+)[`"]'
+    $match = [regex]::Match($content, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)
+    if (-not $match.Success) { return $null }
+    return $match.Groups['version'].Value
+}
+
+function Merge-CapabilityConfiguredFlag($first, $second) {
+    if ($first -eq $true -or $second -eq $true) { return $true }
+    if ($first -eq $false -and $second -eq $false) { return $false }
+    return $null
+}
+
+function New-PluginCapability {
+    return [pscustomobject][ordered]@{
+        inspection = 'unavailable'
+        reason = $null
+        source = $null
+        count = $null
+        items = @()
+    }
+}
+
+function ConvertFrom-PluginCapability($content) {
+    try {
+        $payload = $content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if (-not ($payload.PSObject.Properties.Name -contains 'plugins')) { return $null }
+
+    $items = [System.Collections.Generic.List[object]]::new()
+    $configured = $false
+    $index = 0
+    foreach ($plugin in @($payload.plugins)) {
+        $index++
+        if ($null -eq $plugin) { continue }
+        $propertyNames = @($plugin.PSObject.Properties.Name)
+        if ($propertyNames -contains 'configured' -and $plugin.configured -eq $true) { $configured = $true }
+        $pluginId = if ($propertyNames -contains 'id' -and $plugin.id -is [string]) { $plugin.id.Trim() } else { '' }
+        if ($pluginId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') { $pluginId = "redacted-plugin-$index" }
+        $metadata = if ($propertyNames -contains 'metadata' -and $null -ne $plugin.metadata) { $plugin.metadata } else { $null }
+        $name = if ($metadata -and $metadata.PSObject.Properties.Name -contains 'name' -and $metadata.name -is [string]) { $metadata.name.Trim() }
+            elseif ($propertyNames -contains 'name' -and $plugin.name -is [string]) { $plugin.name.Trim() }
+            else { $pluginId }
+        if (-not $name -or $name.Length -gt 80 -or $name -match '[@\\/]|://|[\x00-\x1f]' -or $name -notmatch '^[A-Za-z0-9 ._()+-]+$') {
+            $name = $pluginId
+        }
+        $version = if ($metadata -and $metadata.PSObject.Properties.Name -contains 'version' -and $metadata.version -is [string]) { $metadata.version.Trim() }
+            elseif ($propertyNames -contains 'version' -and $plugin.version -is [string]) { $plugin.version.Trim() }
+            else { $null }
+        if ($version -and $version -notmatch '^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$') { $version = $null }
+        $enabled = if ($propertyNames -contains 'effective_enabled' -and $plugin.effective_enabled -is [bool]) { $plugin.effective_enabled }
+            elseif ($propertyNames -contains 'enabled' -and $plugin.enabled -is [bool]) { $plugin.enabled }
+            else { $null }
+        $menuCount = if ($propertyNames -contains 'menus' -and $null -ne $plugin.menus) { @($plugin.menus).Count } else { 0 }
+        $items.Add([pscustomobject][ordered]@{
+            id = $pluginId
+            name = $name
+            version = $version
+            enabled = $enabled
+            menu_count = $menuCount
+        }) | Out-Null
+    }
+    $systemEnabled = if ($payload.PSObject.Properties.Name -contains 'plugins_enabled' -and $payload.plugins_enabled -is [bool]) { $payload.plugins_enabled } else { $null }
+    return [pscustomobject][ordered]@{
+        plugins = [pscustomobject][ordered]@{
+            inspection = 'available'
+            reason = $null
+            source = 'management_api'
+            count = $items.Count
+            items = @($items)
+        }
+        configured = $configured
+        enabled = $systemEnabled
+    }
+}
+
+function Get-CpaBuildMetadataFromLogs($containerRunning) {
+    $result = [ordered]@{ version = $null; commit = $null }
+    if ($containerRunning -ne $true) { return [pscustomobject]$result }
+    $native = Invoke-ReadOnlyNative -File 'docker' -Arguments @('logs', '--tail', '5000', $script:CONTAINER_NAME)
+    foreach ($line in $native.Output) {
+        if ($line -match 'CLIProxyAPI\s+Version:\s*(v?\d+\.\d+\.\d+)') {
+            $result.version = $Matches[1]
+            if ($line -match 'Commit:\s*([0-9a-fA-F]+)') {
+                $candidate = $Matches[1]
+                if ($candidate.Length -ge 7 -and $candidate.Length -le 40) { $result.commit = $candidate }
+            }
+        }
+    }
+    return [pscustomobject]$result
+}
+
+function Get-PluginBinarySupport($containerRunning) {
+    if ($containerRunning -ne $true) { return $null }
+    $scriptText = 'if ! command -v ldd >/dev/null 2>&1; then printf unknown; elif ldd /proc/1/exe >/dev/null 2>&1; then printf true; else printf false; fi'
+    $native = Invoke-ReadOnlyNative -File 'docker' -Arguments @('exec', $script:CONTAINER_NAME, 'sh', '-c', $scriptText)
+    if ($native.ExitCode -ne 0 -or $native.Output.Count -eq 0) { return $null }
+    return ConvertTo-CapabilityBoolean $native.Output[0]
+}
+
+function Get-AuditedCpaContract($version, $commit) {
+    if (-not $version -or -not $commit) { return $null }
+    if (($version -eq 'v7.2.102' -or $version -eq '7.2.102') -and $commit.StartsWith('8423cce')) {
+        return 'v7.2.102'
+    }
+    if (($version -eq $script:RELEASE_CONTRACT_CPA_VERSION -or $version -eq $script:RELEASE_CONTRACT_CPA_VERSION.TrimStart('v')) -and
+        $script:RELEASE_CONTRACT_CPA_COMMIT.StartsWith($commit)) {
+        return 'v7.2.111'
+    }
+    return $null
+}
+
+function Test-AuditedCpaContract($version, $commit) {
+    return [bool](Get-AuditedCpaContract $version $commit)
+}
+
+function Get-LatestCpaBackupTime {
+    $backupDir = Join-Path $script:SCRIPT_DIR 'backups'
+    if (-not (Test-Path $backupDir -PathType Container)) { return $null }
+    $latest = Get-ChildItem -LiteralPath $backupDir -File -Filter '*.tgz' -ErrorAction SilentlyContinue |
+        Where-Object { $_.BaseName -notmatch '^sub2api' } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if (-not $latest) { return $null }
+    return $latest.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
+
+function Add-CapabilityFinding($list, $code, $severity, $message) {
+    $list.Add([pscustomobject][ordered]@{
+        code = $code
+        severity = $severity
+        message = $message
+    }) | Out-Null
+}
+
+function Get-CpaCapabilityProbe {
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $configuredAddress = if ($env:CPA_BIND_HOST) { $env:CPA_BIND_HOST } else { '127.0.0.1' }
+    $configuredPortRaw = if ($script:CPA_PORT) { $script:CPA_PORT.ToString() } else { '8317' }
+    $configuredPortParsed = 0
+    $configuredPort = if ([int]::TryParse($configuredPortRaw, [ref]$configuredPortParsed)) { $configuredPortParsed } else { $null }
+    $actualAddress = $null
+    $actualPort = $null
+    $containerRunning = $null
+    $imageReference = $script:DOCKER_IMAGE
+    $imageLocalId = $null
+    $repositoryDigest = $null
+    $cpaVersion = $null
+    $cpaCommit = $null
+    $apiHealthy = $null
+    $healthHttpStatus = $null
+    $modelsHttpStatus = $null
+    $modelCount = $null
+    $previousImageAvailable = $null
+    $managementUiEnabled = $null
+    $managementUiReachable = $null
+    $managementUiHttpStatus = $null
+    $managementUiLocalUrl = $null
+    $managementUiVersion = $null
+    $managementUiVersionSource = $null
+    $managementUiExternalHttps = $null
+    $managementUiPublicWarning = $null
+    $managementAuthenticated = $null
+    $managementConfigHttpStatus = $null
+    $officialContractSource = $null
+    $managementApiAvailable = $null
+    $authFilesInventorySupported = $null
+    $accountStatusSupported = $null
+    $priorityReadSupported = $null
+    $priorityWriteSupported = $null
+    $quotaResetSupported = $null
+    $routingStrategySupported = $null
+    $pluginSystemSupported = $null
+    $pluginResourceManagementAuthenticated = $null
+    $pluginResourceVerification = $null
+    $criticalPublicPluginResourceExposure = $null
+    $configPriorityConfigured = $null
+    $configWeightConfigured = $null
+    $authFilesPriorityConfigured = $null
+    $authFilesWeightConfigured = $null
+    $weightedRoundRobinSupported = $null
+    $prioritySupported = $null
+    $sessionAffinitySupported = $null
+    $automaticFailoverSupported = $null
+    $wrrTrafficValidation = 'not_run'
+    $releaseCompatibilityStatus = $null
+    $plugins = New-PluginCapability
+    $credentials = New-ProviderCredentialCapability
+
+    $configState = if (Test-Path $script:CONFIG_FILE -PathType Container) { 'directory' }
+        elseif (Test-Path $script:CONFIG_FILE -PathType Leaf) { 'file' }
+        else { 'missing' }
+    $configApiKeyCount = if ($configState -eq 'file') { @(Get-ConfigApiKeys).Count } else { $null }
+
+    $dockerCli = $null -ne (Get-Command docker -ErrorAction SilentlyContinue)
+    $dockerDaemon = $false
+    if ($dockerCli) {
+        $dockerInfo = Invoke-ReadOnlyNative -File 'docker' -Arguments @('info')
+        $dockerDaemon = $dockerInfo.ExitCode -eq 0
+    }
+
+    $script:COMPOSE_CMD = detect-compose
+    $composeAvailable = [bool]$script:COMPOSE_CMD
+    $composeValid = $null
+    if ($composeAvailable -and $configState -eq 'file') {
+        $composeParts = $script:COMPOSE_CMD -split '\s+'
+        $composeArgs = @()
+        if ($composeParts.Count -gt 1) { $composeArgs += $composeParts[1..($composeParts.Count - 1)] }
+        $composeArgs += @('-f', $script:COMPOSE_FILE, 'config', '--quiet')
+        $composeResult = Invoke-ReadOnlyNative -File $composeParts[0] -Arguments $composeArgs
+        $composeValid = $composeResult.ExitCode -eq 0
+    }
+
+    if ($dockerDaemon) {
+        $containerResult = Invoke-ReadOnlyNative -File 'docker' -Arguments @(
+            'inspect', '--format', '{{.Config.Image}}|{{.Image}}|{{.State.Running}}', $script:CONTAINER_NAME
+        )
+        if ($containerResult.ExitCode -eq 0 -and $containerResult.Output.Count -gt 0) {
+            $containerParts = $containerResult.Output[0] -split '\|', 3
+            if ($containerParts.Count -eq 3) {
+                if ($containerParts[0]) { $imageReference = $containerParts[0] }
+                if ($containerParts[1]) { $imageLocalId = $containerParts[1] }
+                $containerRunning = ConvertTo-CapabilityBoolean $containerParts[2]
+            }
+        } else {
+            $containerRunning = $false
+            $imageResult = Invoke-ReadOnlyNative -File 'docker' -Arguments @('image', 'inspect', '--format', '{{.Id}}', $imageReference)
+            if ($imageResult.ExitCode -eq 0 -and $imageResult.Output.Count -gt 0) {
+                $imageLocalId = $imageResult.Output[0]
+            }
+        }
+
+        if ($containerRunning -eq $true) {
+            $portResult = Invoke-ReadOnlyNative -File 'docker' -Arguments @('port', $script:CONTAINER_NAME, '8317/tcp')
+            if ($portResult.ExitCode -eq 0) {
+                $binding = Select-CapabilityBinding $portResult.Output
+                if ($binding) {
+                    $actualAddress = $binding.Address
+                    $actualPort = $binding.Port
+                }
+            }
+        }
+
+        $imageTarget = if ($imageLocalId) { $imageLocalId } else { $imageReference }
+        $digestResult = Invoke-ReadOnlyNative -File 'docker' -Arguments @(
+            'image', 'inspect', '--format', '{{range .RepoDigests}}{{println .}}{{end}}', $imageTarget
+        )
+        if ($digestResult.ExitCode -eq 0) {
+            $repositoryDigest = @($digestResult.Output | Where-Object { $_ } | Select-Object -First 1)
+            if ($repositoryDigest.Count -gt 0) { $repositoryDigest = $repositoryDigest[0] } else { $repositoryDigest = $null }
+        }
+
+        $rollbackResult = Invoke-ReadOnlyNative -File 'docker' -Arguments @('image', 'inspect', $script:ROLLBACK_IMAGE)
+        $previousImageAvailable = $rollbackResult.ExitCode -eq 0
+
+        $buildMetadata = Get-CpaBuildMetadataFromLogs $containerRunning
+        $cpaVersion = $buildMetadata.version
+        $cpaCommit = $buildMetadata.commit
+        $pluginSystemSupported = Get-PluginBinarySupport $containerRunning
+    }
+
+    $classificationAddress = if ($actualAddress) { $actualAddress } else { $configuredAddress }
+    $exposureHint = if ($env:CPA_EXPOSURE_MODE) { $env:CPA_EXPOSURE_MODE.ToLowerInvariant() } else { '' }
+    $exposureMode = if (-not $classificationAddress) { 'unknown' }
+        elseif (Test-CapabilityLoopback $classificationAddress) {
+            if ($exposureHint -eq 'public-proxy') { 'public-proxy' } else { 'local' }
+        } else { 'direct-public' }
+
+    $remoteManagement = Get-RemoteManagementCapability
+    $routingConfig = Get-RoutingConfigCapability
+    $routingStrategy = $routingConfig.strategy
+    $sessionAffinityEnabled = $routingConfig.session_affinity_enabled
+    $sessionAffinityTtl = $routingConfig.session_affinity_ttl
+    $pluginConfig = Get-PluginConfigCapability
+    $latestBackupTime = Get-LatestCpaBackupTime
+
+    $probePort = if ($null -ne $actualPort) { $actualPort } else { $configuredPort }
+    $probeAddress = if ($actualAddress) { $actualAddress } else { $configuredAddress }
+    if ($containerRunning -eq $true -and $null -ne $probePort) {
+        $requestHost = Get-CapabilityProbeHost $probeAddress
+        $baseUri = "http://${requestHost}:$probePort"
+        $managementUiLocalUrl = "$baseUri/management.html"
+
+        $healthResponse = Invoke-CapabilityWebRequest -Uri "$baseUri/healthz"
+        $healthHttpStatus = $healthResponse.StatusCode
+
+        $managementPageResponse = Invoke-CapabilityWebRequest -Uri $managementUiLocalUrl
+        $managementUiHttpStatus = $managementPageResponse.StatusCode
+        if ($managementUiHttpStatus -eq 200) {
+            $managementUiReachable = $true
+            $managementUiEnabled = $true
+            $managementUiVersion = ConvertFrom-ManagementCenterVersion $managementPageResponse.Content
+            if ($managementUiVersion) { $managementUiVersionSource = 'management_html' }
+        } elseif ($null -ne $managementUiHttpStatus) {
+            $managementUiReachable = $false
+        }
+
+        Sync-ApiKeyFromConfig
+        if ($script:CPA_API_KEY) {
+            $modelsResponse = Invoke-CapabilityWebRequest -Uri "$baseUri/v1/models" `
+                -Headers @{ Authorization = "Bearer $($script:CPA_API_KEY)" }
+            $modelsHttpStatus = $modelsResponse.StatusCode
+            if ($modelsHttpStatus -eq 200) {
+                try {
+                    $modelsJson = $modelsResponse.Content | ConvertFrom-Json -ErrorAction Stop
+                    if ($modelsJson.PSObject.Properties.Name -contains 'data') {
+                        $modelCount = @($modelsJson.data).Count
+                    } elseif ($modelsJson.PSObject.Properties.Name -contains 'models') {
+                        $modelCount = @($modelsJson.models).Count
+                    } else {
+                        $modelCount = 0
+                    }
+                } catch {
+                    $modelCount = $null
+                }
+            }
+        }
+
+        if ($healthHttpStatus -eq 200 -or $modelsHttpStatus -eq 200) { $apiHealthy = $true }
+        elseif ($null -ne $healthHttpStatus -or $null -ne $modelsHttpStatus) { $apiHealthy = $false }
+
+        if ($script:CPA_MANAGEMENT_KEY) {
+            $managementHeaders = @{ Authorization = "Bearer $($script:CPA_MANAGEMENT_KEY)" }
+            $metadataResponse = Invoke-CapabilityWebRequest -Uri "$baseUri/v0/management/config" -Headers $managementHeaders
+            $managementConfigHttpStatus = $metadataResponse.StatusCode
+            if ($managementConfigHttpStatus -eq 200) {
+                $managementAuthenticated = $true
+                $managementApiAvailable = $true
+                $headerVersion = Get-CapabilityHeaderValue $metadataResponse.Headers 'X-CPA-VERSION'
+                $headerCommit = Get-CapabilityHeaderValue $metadataResponse.Headers 'X-CPA-COMMIT'
+                if ($headerVersion) { $cpaVersion = $headerVersion }
+                if ($headerCommit) { $cpaCommit = $headerCommit }
+                $pluginHeader = Get-CapabilityHeaderValue $metadataResponse.Headers 'X-CPA-SUPPORT-PLUGIN'
+                if ($pluginHeader -in @('1', 'true')) { $pluginSystemSupported = $true }
+                elseif ($pluginHeader -in @('0', 'false')) { $pluginSystemSupported = $false }
+
+                $managementConfig = ConvertFrom-ManagementConfigCapability $metadataResponse.Content
+                if ($managementConfig) {
+                    $configPriorityConfigured = $managementConfig.priority_configured
+                    $configWeightConfigured = $managementConfig.weight_configured
+                    $routingStrategy = $managementConfig.strategy
+                    $sessionAffinityEnabled = $managementConfig.session_affinity_enabled
+                    $sessionAffinityTtl = $managementConfig.session_affinity_ttl
+                }
+
+                $authFilesResponse = Invoke-CapabilityWebRequest -Uri "$baseUri/v0/management/auth-files" -Headers $managementHeaders
+                if ($authFilesResponse.StatusCode -eq 200) {
+                    $authFiles = ConvertFrom-AuthFilesCapability $authFilesResponse.Content
+                    if ($authFiles) {
+                        $credentials = $authFiles.credentials
+                        $authFilesInventorySupported = $true
+                        if ($authFiles.status_supported) { $accountStatusSupported = $true }
+                        if ($authFiles.priority_supported) { $priorityReadSupported = $true }
+                        $authFilesPriorityConfigured = $authFiles.priority_configured
+                        $authFilesWeightConfigured = $authFiles.weight_configured
+                    }
+                }
+
+                $pluginResponse = Invoke-CapabilityWebRequest -Uri "$baseUri/v0/management/plugins" -Headers $managementHeaders
+                if ($pluginResponse.StatusCode -eq 200) {
+                    $pluginData = ConvertFrom-PluginCapability $pluginResponse.Content
+                    if ($pluginData) {
+                        $plugins = $pluginData.plugins
+                        $pluginSystemSupported = $true
+                        if ($pluginData.configured) { $pluginConfig.configured = $true }
+                        if ($null -ne $pluginData.enabled) { $pluginConfig.enabled = $pluginData.enabled }
+                    }
+                } else {
+                    $plugins.reason = 'plugin_api_unavailable'
+                }
+
+                $routingResponse = Invoke-CapabilityWebRequest -Uri "$baseUri/v0/management/routing/strategy" -Headers $managementHeaders
+                if ($routingResponse.StatusCode -eq 200) {
+                    $routingStrategySupported = $true
+                    $observedRoutingStrategy = ConvertFrom-RoutingStrategyCapability $routingResponse.Content
+                    if ($observedRoutingStrategy) { $routingStrategy = $observedRoutingStrategy }
+                }
+            } elseif ($managementConfigHttpStatus -in @(401, 403)) {
+                $managementAuthenticated = $false
+                $managementApiAvailable = $true
+                $plugins.reason = 'management_key_rejected'
+            } else {
+                $plugins.reason = 'management_api_unavailable'
+            }
+        } else {
+            $plugins.reason = 'management_key_unavailable'
+        }
+    }
+
+    $auditedContract = Get-AuditedCpaContract $cpaVersion $cpaCommit
+    if ($auditedContract) {
+        $officialContractSource = if ($managementAuthenticated -eq $true) { 'live_and_audited' } else { "audited_$auditedContract" }
+        $managementApiAvailable = $true
+        $authFilesInventorySupported = $true
+        $accountStatusSupported = $true
+        $priorityReadSupported = $true
+        $priorityWriteSupported = $true
+        $quotaResetSupported = $true
+        $routingStrategySupported = $true
+        $pluginResourceManagementAuthenticated = $false
+        $pluginResourceVerification = "audited_$auditedContract"
+        $prioritySupported = $true
+        if ($auditedContract -eq 'v7.2.111') {
+            $cpaVersion = $script:RELEASE_CONTRACT_CPA_VERSION
+            $cpaCommit = $script:RELEASE_CONTRACT_CPA_COMMIT
+            $weightedRoundRobinSupported = $true
+            $sessionAffinitySupported = $true
+            $automaticFailoverSupported = $true
+        }
+        if (-not $pluginConfig.section_present) {
+            $pluginConfig.configured = $false
+            $pluginConfig.enabled = $false
+        }
+    } elseif ($managementAuthenticated -eq $true) {
+        $officialContractSource = 'live'
+    }
+
+    if ($credentials.source -ne 'management_api') {
+        $credentials = Get-ProviderCredentialFallbackCapability $containerRunning
+    }
+    $priorityConfigured = Merge-CapabilityConfiguredFlag $configPriorityConfigured $authFilesPriorityConfigured
+    $credentialWeightsConfigured = Merge-CapabilityConfiguredFlag $configWeightConfigured $authFilesWeightConfigured
+    $weightedRoundRobinConfigured = if ($routingStrategy -eq 'weighted-round-robin') { $true }
+        elseif ($routingStrategy -in @('round-robin', 'fill-first')) { $false }
+        else { $null }
+
+    if ($cpaVersion -eq $script:RELEASE_CONTRACT_CPA_VERSION -or $cpaVersion -eq $script:RELEASE_CONTRACT_CPA_VERSION.TrimStart('v')) {
+        if (-not $cpaCommit) {
+            $releaseCompatibilityStatus = $null
+        } elseif (-not $script:RELEASE_CONTRACT_CPA_COMMIT.StartsWith($cpaCommit)) {
+            $releaseCompatibilityStatus = 'cpa_commit_mismatch'
+        } elseif (-not $managementUiVersion) {
+            $releaseCompatibilityStatus = $null
+        } elseif ($managementUiVersion -eq $script:RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION) {
+            $releaseCompatibilityStatus = 'compatible'
+        } else {
+            $releaseCompatibilityStatus = 'management_center_mismatch'
+        }
+    } elseif ($cpaVersion) {
+        $releaseCompatibilityStatus = 'cpa_version_mismatch'
+    }
+    if ($null -eq $managementUiEnabled) {
+        if ($remoteManagement.control_panel_disabled -eq $true) { $managementUiEnabled = $false }
+        elseif ($remoteManagement.control_panel_disabled -eq $false) { $managementUiEnabled = $true }
+    }
+    if ($exposureMode -eq 'local' -or $managementUiEnabled -eq $false) {
+        $managementUiPublicWarning = 'none'
+    } elseif ($exposureMode -eq 'direct-public' -and $managementUiEnabled -eq $true -and $remoteManagement.allow_remote -eq $true) {
+        $managementUiPublicWarning = 'critical'
+    } elseif ($exposureMode -in @('direct-public', 'public-proxy')) {
+        $managementUiPublicWarning = 'warning'
+    }
+    if ($pluginResourceManagementAuthenticated -eq $false -and $pluginSystemSupported -eq $true) {
+        $criticalPublicPluginResourceExposure = ($exposureMode -eq 'direct-public' -and $remoteManagement.allow_remote -eq $true)
+    }
+
+    if (-not $dockerCli) {
+        Add-CapabilityFinding $findings 'DOCKER_CLI_UNAVAILABLE' 'failure' 'Docker CLI is unavailable.'
+    } elseif (-not $dockerDaemon) {
+        Add-CapabilityFinding $findings 'DOCKER_DAEMON_UNAVAILABLE' 'failure' 'Docker daemon is unavailable.'
+    }
+    if (-not $composeAvailable) {
+        Add-CapabilityFinding $findings 'COMPOSE_UNAVAILABLE' 'failure' 'Docker Compose is unavailable.'
+    } elseif ($composeValid -eq $false) {
+        Add-CapabilityFinding $findings 'COMPOSE_CONFIG_INVALID' 'failure' 'docker-compose.yml did not pass validation.'
+    }
+    if ($null -eq $configuredPort) {
+        Add-CapabilityFinding $findings 'INVALID_CONFIGURED_PORT' 'failure' 'CPA_PORT is not a valid number.'
+    }
+    if ($configState -eq 'directory') {
+        Add-CapabilityFinding $findings 'CONFIG_IS_DIRECTORY' 'failure' 'config.yaml is a directory, not a file.'
+    } elseif ($configState -eq 'missing') {
+        Add-CapabilityFinding $findings 'CONFIG_MISSING' 'failure' 'config.yaml is missing.'
+    } elseif ($configApiKeyCount -eq 0) {
+        Add-CapabilityFinding $findings 'API_KEYS_MISSING' 'failure' 'No API keys were found in config.yaml.'
+    }
+    if ($containerRunning -eq $false) {
+        Add-CapabilityFinding $findings 'CONTAINER_NOT_RUNNING' 'warning' 'The CPA container is not running.'
+    } elseif ($containerRunning -eq $true -and -not $actualAddress) {
+        Add-CapabilityFinding $findings 'PORT_MAPPING_UNAVAILABLE' 'warning' 'The actual CPA port mapping could not be read.'
+    }
+    if ($exposureMode -eq 'direct-public') {
+        Add-CapabilityFinding $findings 'DIRECT_PUBLIC_EXPOSURE' 'warning' "CPA is bound directly to a public interface (${classificationAddress}:$probePort)."
+        Add-CapabilityFinding $findings 'PUBLIC_PROTECTION_UNVERIFIED' 'warning' 'TLS, firewall/source limits, and rate limits cannot be verified by this local probe.'
+        if ($remoteManagement.allow_remote -eq $true) {
+            Add-CapabilityFinding $findings 'REMOTE_MANAGEMENT_PUBLIC' 'warning' 'Remote management is allowed while CPA is directly public.'
+            if ($remoteManagement.control_panel_disabled -eq $false) {
+                Add-CapabilityFinding $findings 'PUBLIC_CONTROL_PANEL_ENABLED' 'warning' 'The management control panel is enabled on the direct-public CPA endpoint.'
+            }
+            if ($remoteManagement.secret_configured -eq $false) {
+                Add-CapabilityFinding $findings 'REMOTE_MANAGEMENT_SECRET_MISSING' 'failure' 'Remote management is public but no management secret is configured.'
+            }
+        }
+    } elseif ($exposureMode -eq 'public-proxy') {
+        Add-CapabilityFinding $findings 'PUBLIC_PROXY_PROTECTION_UNVERIFIED' 'warning' 'External HTTPS and proxy access controls cannot be verified by this local probe.'
+    }
+    if ($managementUiEnabled -eq $true -and $managementUiReachable -eq $false) {
+        Add-CapabilityFinding $findings 'MANAGEMENT_UI_UNREACHABLE' 'warning' 'The management UI is enabled but its local page did not return HTTP 200.'
+    }
+    if ($criticalPublicPluginResourceExposure -eq $true) {
+        Add-CapabilityFinding $findings 'PUBLIC_PLUGIN_RESOURCES_UNAUTHENTICATED' 'critical' 'CPA plugin resource pages are not protected by management authentication while remote management is exposed over direct-public HTTP.'
+    }
+    if ($pluginSystemSupported -eq $true -and $plugins.inspection -ne 'available') {
+        Add-CapabilityFinding $findings 'PLUGIN_INSPECTION_UNAVAILABLE' 'warning' 'Plugin support is available, but installed plugins could not be inspected through the authenticated Management API.'
+    }
+    if ($exposureHint -eq 'public-proxy' -and $exposureMode -eq 'direct-public') {
+        Add-CapabilityFinding $findings 'EXPOSURE_HINT_MISMATCH' 'warning' 'CPA_EXPOSURE_MODE says public-proxy, but the actual binding is public.'
+    }
+    if ($containerRunning -eq $true) {
+        if ($apiHealthy -eq $false) {
+            Add-CapabilityFinding $findings 'API_UNHEALTHY' 'failure' 'The local CPA health check failed.'
+        } elseif ($null -eq $apiHealthy) {
+            Add-CapabilityFinding $findings 'API_HEALTH_UNKNOWN' 'warning' 'The local CPA health check could not be completed.'
+        }
+        if ($modelsHttpStatus -eq 401) {
+            Add-CapabilityFinding $findings 'MODELS_AUTH_FAILED' 'failure' '/v1/models rejected the configured API key.'
+        } elseif ($null -eq $modelsHttpStatus) {
+            Add-CapabilityFinding $findings 'MODELS_CHECK_UNKNOWN' 'warning' '/v1/models could not be checked.'
+        } elseif ($modelsHttpStatus -eq 200 -and $modelCount -eq 0) {
+            Add-CapabilityFinding $findings 'MODELS_EMPTY' 'warning' '/v1/models is healthy but returned no models.'
+        }
+    }
+    if ($credentials.inspection -eq 'unknown') {
+        Add-CapabilityFinding $findings 'CREDENTIAL_INSPECTION_UNKNOWN' 'warning' 'Provider credential counts could not be inspected read-only.'
+    } elseif ($credentials.total -eq 0) {
+        Add-CapabilityFinding $findings 'NO_PROVIDER_CREDENTIALS' 'warning' 'No provider credentials were found.'
+    }
+    if (-not $latestBackupTime) {
+        Add-CapabilityFinding $findings 'NO_CPA_BACKUP' 'warning' 'No CPA backup archive was found.'
+    }
+    if ($previousImageAvailable -eq $false) {
+        Add-CapabilityFinding $findings 'NO_PREVIOUS_IMAGE' 'warning' 'No previous-image recovery target is available.'
+    }
+
+    $data = [pscustomobject][ordered]@{
+        schema_version = 1
+        generated_at = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        manager = [pscustomobject][ordered]@{
+            version = $script:VERSION
+        }
+        container = [pscustomobject][ordered]@{
+            name = $script:CONTAINER_NAME
+            running = $containerRunning
+        }
+        network = [pscustomobject][ordered]@{
+            configured_address = $configuredAddress
+            configured_port = $configuredPort
+            actual_address = $actualAddress
+            actual_port = $actualPort
+            exposure_mode = $exposureMode
+        }
+        image = [pscustomobject][ordered]@{
+            reference = $imageReference
+            local_id = $imageLocalId
+            repository_digest = $repositoryDigest
+        }
+        cpa = [pscustomobject][ordered]@{
+            version = $cpaVersion
+            commit = $cpaCommit
+        }
+        release_contract = [pscustomobject][ordered]@{
+            cpa_version = $script:RELEASE_CONTRACT_CPA_VERSION
+            cpa_commit = $script:RELEASE_CONTRACT_CPA_COMMIT
+            management_center_version = $script:RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION
+            management_center_commit = $script:RELEASE_CONTRACT_MANAGEMENT_CENTER_COMMIT
+            source = 'exact_release_tags'
+            target_pair_compatible = $true
+            compatibility_status = $releaseCompatibilityStatus
+        }
+        api = [pscustomobject][ordered]@{
+            healthy = $apiHealthy
+            health_http_status = $healthHttpStatus
+            models_http_status = $modelsHttpStatus
+            model_count = $modelCount
+        }
+        remote_management = $remoteManagement
+        management_ui = [pscustomobject][ordered]@{
+            enabled = $managementUiEnabled
+            reachable = $managementUiReachable
+            http_status = $managementUiHttpStatus
+            local_url = $managementUiLocalUrl
+            version = $managementUiVersion
+            version_source = $managementUiVersionSource
+            remote_access_allowed = $remoteManagement.allow_remote
+            external_https_protection = $managementUiExternalHttps
+            public_access_warning = $managementUiPublicWarning
+        }
+        official_capabilities = [pscustomobject][ordered]@{
+            contract_source = $officialContractSource
+            management_api_available = $managementApiAvailable
+            auth_files_inventory_supported = $authFilesInventorySupported
+            account_status_supported = $accountStatusSupported
+            priority_read_supported = $priorityReadSupported
+            priority_write_supported = $priorityWriteSupported
+            quota_reset_supported = $quotaResetSupported
+            routing_strategy_supported = $routingStrategySupported
+            plugin_system_supported = $pluginSystemSupported
+            plugin_system_configured = $pluginConfig.configured
+            plugin_system_enabled = $pluginConfig.enabled
+        }
+        routing = [pscustomobject][ordered]@{
+            strategy = $routingStrategy
+            weighted_round_robin_supported = $weightedRoundRobinSupported
+            weighted_round_robin_configured = $weightedRoundRobinConfigured
+            priority_supported = $prioritySupported
+            priority_configured = $priorityConfigured
+            credential_weights_configured = $credentialWeightsConfigured
+            session_affinity_supported = $sessionAffinitySupported
+            session_affinity_enabled = $sessionAffinityEnabled
+            session_affinity_ttl = $sessionAffinityTtl
+            automatic_failover_supported = $automaticFailoverSupported
+            wrr_traffic_validation = $wrrTrafficValidation
+        }
+        plugins = $plugins
+        security = [pscustomobject][ordered]@{
+            plugin_resource_pages_management_authenticated = $pluginResourceManagementAuthenticated
+            plugin_resource_pages_verification = $pluginResourceVerification
+            critical_public_plugin_resource_exposure = $criticalPublicPluginResourceExposure
+        }
+        credentials = $credentials
+        recovery = [pscustomobject][ordered]@{
+            latest_backup_time = $latestBackupTime
+            previous_image_available = $previousImageAvailable
+        }
+        warnings = @($findings)
+    }
+    $diagnostics = [pscustomobject][ordered]@{
+        docker_cli = $dockerCli
+        docker_daemon = $dockerDaemon
+        compose_available = $composeAvailable
+        compose_command = $script:COMPOSE_CMD
+        compose_valid = $composeValid
+        config_state = $configState
+        config_api_key_count = $configApiKeyCount
+        management_authenticated = $managementAuthenticated
+        management_config_http_status = $managementConfigHttpStatus
+    }
+    return [pscustomobject]@{ Data = $data; Diagnostics = $diagnostics }
+}
+
+function Format-CapabilityValue($value) {
+    if ($null -eq $value) { return 'unavailable' }
+    if ($value -is [string] -and $value.Length -eq 0) { return 'unavailable' }
+    return $value.ToString()
+}
+
+function Format-CapabilityBoolean($value) {
+    if ($value -eq $true) { return 'yes' }
+    if ($value -eq $false) { return 'no' }
+    return 'unavailable'
+}
+
+function Write-CpaCapabilitiesHuman($data) {
+    Write-Host ''
+    Write-Host "  CLI Proxy Manager capabilities (schema v$($data.schema_version))"
+    Write-Host ''
+    Write-Host "  Manager version:          $($data.manager.version)"
+    Write-Host "  CPA container running:    $(Format-CapabilityBoolean $data.container.running)"
+    Write-Host "  Configured binding:       $($data.network.configured_address):$(Format-CapabilityValue $data.network.configured_port)"
+    if ($data.network.actual_address) {
+        Write-Host "  Actual binding:           $($data.network.actual_address):$(Format-CapabilityValue $data.network.actual_port)"
+    } else {
+        Write-Host '  Actual binding:           unavailable'
+    }
+    Write-Host "  Exposure mode:            $(Format-CapabilityValue $data.network.exposure_mode)"
+    Write-Host "  Image reference:          $(Format-CapabilityValue $data.image.reference)"
+    Write-Host "  Local image ID:           $(Format-CapabilityValue $data.image.local_id)"
+    Write-Host "  Repository digest:        $(Format-CapabilityValue $data.image.repository_digest)"
+    Write-Host "  CPA version:              $(Format-CapabilityValue $data.cpa.version)"
+    Write-Host "  CPA commit:               $(Format-CapabilityValue $data.cpa.commit)"
+    Write-Host "  Release contract:         CPA $($data.release_contract.cpa_version)@$($data.release_contract.cpa_commit), Management Center $($data.release_contract.management_center_version)@$($data.release_contract.management_center_commit)"
+    Write-Host "  Contract compatibility:   source=$($data.release_contract.source), target_pair=$(Format-CapabilityBoolean $data.release_contract.target_pair_compatible), runtime=$(Format-CapabilityValue $data.release_contract.compatibility_status)"
+    Write-Host "  API healthy:              $(Format-CapabilityBoolean $data.api.healthy) (healthz=$(Format-CapabilityValue $data.api.health_http_status), models=$(Format-CapabilityValue $data.api.models_http_status))"
+    Write-Host "  Model count:              $(Format-CapabilityValue $data.api.model_count)"
+    Write-Host "  Remote management:        configured=$(Format-CapabilityBoolean $data.remote_management.configured), allow_remote=$(Format-CapabilityBoolean $data.remote_management.allow_remote), panel_disabled=$(Format-CapabilityBoolean $data.remote_management.control_panel_disabled), secret_configured=$(Format-CapabilityBoolean $data.remote_management.secret_configured)"
+    Write-Host "  Management UI:            enabled=$(Format-CapabilityBoolean $data.management_ui.enabled), reachable=$(Format-CapabilityBoolean $data.management_ui.reachable), http=$(Format-CapabilityValue $data.management_ui.http_status)"
+    Write-Host "  Management Center:        version=$(Format-CapabilityValue $data.management_ui.version), source=$(Format-CapabilityValue $data.management_ui.version_source)"
+    Write-Host "  Management local URL:     $(Format-CapabilityValue $data.management_ui.local_url)"
+    Write-Host "  Management protection:    remote_allowed=$(Format-CapabilityBoolean $data.management_ui.remote_access_allowed), external_https=$(Format-CapabilityBoolean $data.management_ui.external_https_protection), public_warning=$(Format-CapabilityValue $data.management_ui.public_access_warning)"
+    Write-Host "  Official capabilities:    management_api=$(Format-CapabilityBoolean $data.official_capabilities.management_api_available), auth_files=$(Format-CapabilityBoolean $data.official_capabilities.auth_files_inventory_supported), account_status=$(Format-CapabilityBoolean $data.official_capabilities.account_status_supported)"
+    Write-Host "  Priority and routing:     priority_read=$(Format-CapabilityBoolean $data.official_capabilities.priority_read_supported), priority_write=$(Format-CapabilityBoolean $data.official_capabilities.priority_write_supported), quota_reset=$(Format-CapabilityBoolean $data.official_capabilities.quota_reset_supported), routing=$(Format-CapabilityBoolean $data.official_capabilities.routing_strategy_supported)"
+    Write-Host "  Routing contract:         strategy=$(Format-CapabilityValue $data.routing.strategy), wrr_supported=$(Format-CapabilityBoolean $data.routing.weighted_round_robin_supported), wrr_configured=$(Format-CapabilityBoolean $data.routing.weighted_round_robin_configured)"
+    Write-Host "  Credential routing:       priority_supported=$(Format-CapabilityBoolean $data.routing.priority_supported), priority_configured=$(Format-CapabilityBoolean $data.routing.priority_configured), weights_configured=$(Format-CapabilityBoolean $data.routing.credential_weights_configured)"
+    Write-Host "  Session affinity:         supported=$(Format-CapabilityBoolean $data.routing.session_affinity_supported), enabled=$(Format-CapabilityBoolean $data.routing.session_affinity_enabled), ttl=$(Format-CapabilityValue $data.routing.session_affinity_ttl)"
+    Write-Host "  Failover / WRR test:      automatic_failover=$(Format-CapabilityBoolean $data.routing.automatic_failover_supported), traffic_validation=$($data.routing.wrr_traffic_validation)"
+    Write-Host "  Plugin system:            supported=$(Format-CapabilityBoolean $data.official_capabilities.plugin_system_supported), configured=$(Format-CapabilityBoolean $data.official_capabilities.plugin_system_configured), enabled=$(Format-CapabilityBoolean $data.official_capabilities.plugin_system_enabled), inspection=$($data.plugins.inspection)"
+    if ($data.plugins.inspection -eq 'available') {
+        Write-Host "  Installed plugins:        $($data.plugins.count)"
+        foreach ($plugin in $data.plugins.items) {
+            Write-Host "    - $($plugin.id) | $($plugin.name) | version=$(Format-CapabilityValue $plugin.version) | enabled=$(Format-CapabilityBoolean $plugin.enabled) | menus=$($plugin.menu_count)"
+        }
+    } else {
+        Write-Host "  Plugin inspection reason: $(Format-CapabilityValue $data.plugins.reason)"
+    }
+    Write-Host "  Plugin resource auth:     management_authenticated=$(Format-CapabilityBoolean $data.security.plugin_resource_pages_management_authenticated), verification=$(Format-CapabilityValue $data.security.plugin_resource_pages_verification)"
+    if ($data.credentials.inspection -eq 'available') {
+        Write-Host "  Provider credentials:     source=$($data.credentials.source), antigravity=$($data.credentials.providers.antigravity), claude=$($data.credentials.providers.claude), codex=$($data.credentials.providers.codex), gemini=$($data.credentials.providers.gemini), kimi=$($data.credentials.providers.kimi), xai=$($data.credentials.providers.xai), unknown=$($data.credentials.providers.unknown), total=$($data.credentials.total)"
+        foreach ($provider in $data.credentials.additional_providers) {
+            Write-Host "    - future provider $($provider.type)=$($provider.count)"
+        }
+    } else {
+        Write-Host '  Provider credentials:     unavailable'
+    }
+    Write-Host "  Latest CPA backup time:   $(Format-CapabilityValue $data.recovery.latest_backup_time)"
+    Write-Host "  Previous image available: $(Format-CapabilityBoolean $data.recovery.previous_image_available)"
+    if ($data.warnings.Count -gt 0) {
+        Write-Host ''
+        Write-Host '  Findings:'
+        foreach ($finding in $data.warnings) {
+            Write-Host "  - [$($finding.severity)] $($finding.code): $($finding.message)"
+        }
+    }
+    Write-Host ''
+}
+
+function cmd-capabilities {
+    param([string[]]$Options = @())
+    if ($Options.Count -gt 1 -or ($Options.Count -eq 1 -and $Options[0] -ne '--json')) {
+        error-msg '用法: .\deploy.ps1 capabilities [--json]'
+        exit 2
+    }
+    $probe = Get-CpaCapabilityProbe
+    if ($Options.Count -eq 1 -and $Options[0] -eq '--json') {
+        $probe.Data | ConvertTo-Json -Depth 8
+    } else {
+        Write-CpaCapabilitiesHuman $probe.Data
     }
 }
 
@@ -416,6 +1650,9 @@ function Invoke-ServiceRecreate {
     Push-Location $script:SCRIPT_DIR
     $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
     $oldNativePreference = $null
+    $previousPort = $env:CPA_PORT
+    $previousImage = $env:CPA_IMAGE
+    $previousPullPolicy = $env:CPA_PULL_POLICY
     try {
         if ($hasNativePreference) {
             $oldNativePreference = $PSNativeCommandUseErrorActionPreference
@@ -423,19 +1660,18 @@ function Invoke-ServiceRecreate {
         }
         $env:CPA_PORT = $script:CPA_PORT
         $env:CPA_IMAGE = $script:DOCKER_IMAGE
-        $previousPullPolicy = $env:CPA_PULL_POLICY
         $env:CPA_PULL_POLICY = 'never'
         $output = Invoke-Compose -f $script:COMPOSE_FILE up -d --force-recreate 2>&1
         $composeExitCode = $LASTEXITCODE
-        if ($null -eq $previousPullPolicy) { Remove-Item Env:CPA_PULL_POLICY -ErrorAction SilentlyContinue }
-        else { $env:CPA_PULL_POLICY = $previousPullPolicy }
-
         if ($output) { detail ([string]($output | Select-Object -Last 1)) }
         return $composeExitCode -eq 0
     } catch {
         detail $_.Exception.Message
         return $false
     } finally {
+        if ($null -eq $previousPort) { Remove-Item Env:CPA_PORT -ErrorAction SilentlyContinue } else { $env:CPA_PORT = $previousPort }
+        if ($null -eq $previousImage) { Remove-Item Env:CPA_IMAGE -ErrorAction SilentlyContinue } else { $env:CPA_IMAGE = $previousImage }
+        if ($null -eq $previousPullPolicy) { Remove-Item Env:CPA_PULL_POLICY -ErrorAction SilentlyContinue } else { $env:CPA_PULL_POLICY = $previousPullPolicy }
         if ($hasNativePreference) {
             $PSNativeCommandUseErrorActionPreference = $oldNativePreference
         }
@@ -603,7 +1839,7 @@ function config-wizard {
         ask '管理面板密码' $defaultMgmt
         $inputMgmt = (Read-Host).Trim()
         $script:CPA_MANAGEMENT_KEY = if ($inputMgmt) { $inputMgmt } else { $defaultMgmt }
-        info "管理面板: 启用  密码: $script:CPA_MANAGEMENT_KEY"
+        info '管理面板: 启用'
     } else {
         $script:CPA_MANAGEMENT_KEY = ''
         info '管理面板: 禁用'
@@ -672,7 +1908,7 @@ nonstream-keepalive-interval: 30
 
 remote-management:
   allow-remote: false
-  secret-key: "$script:CPA_MANAGEMENT_KEY"
+  secret-key: "$($script:CPA_MANAGEMENT_KEY)"
   disable-control-panel: false
 
 plugins:
@@ -961,7 +2197,7 @@ function show-result {
     }
     if ($script:CPA_MANAGEMENT_KEY) {
         Write-Host "  管理面板  http://127.0.0.1:$($script:CPA_PORT)/management.html" -ForegroundColor Green
-        Write-Host "  面板密码  $script:CPA_MANAGEMENT_KEY" -ForegroundColor Green
+        Write-Host '  面板密码  已设置（不回显）' -ForegroundColor DarkGray
     }
     Write-Host ''
     divider
@@ -1265,169 +2501,93 @@ function cmd-logs {
 
 function cmd-doctor {
     banner
-    step 'Doctor 自检'
+    step 'Doctor v2 read-only check'
 
+    $probe = Get-CpaCapabilityProbe
+    $data = $probe.Data
+    $diagnostics = $probe.Diagnostics
     $failures = 0
     $warnings = 0
-    $dockerOk = $false
-    $composeOk = $false
-    $containerRunning = $false
-    $mappedPort = $script:CPA_PORT
 
-    try {
-        $null = Get-Command docker -ErrorAction Stop
-        info 'Docker CLI 已安装'
-    } catch {
-        error-msg '未检测到 Docker CLI'
-        $failures++
+    if ($diagnostics.docker_cli) { info 'Docker CLI is available' }
+    if ($diagnostics.docker_daemon) { info 'Docker daemon is available' }
+    if ($diagnostics.compose_available) { info "Docker Compose is available ($($diagnostics.compose_command))" }
+    if ($diagnostics.config_state -eq 'file') {
+        info "config.yaml is a file; API key count: $(Format-CapabilityValue $diagnostics.config_api_key_count)"
     }
+    if ($diagnostics.compose_valid -eq $true) { info 'docker-compose.yml is valid' }
+    if ($data.container.running -eq $true) { info "CPA container is running: $($data.container.name)" }
 
-    try {
-        $null = docker info 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $dockerOk = $true
-            info 'Docker 守护进程运行中'
-        } else {
-            throw 'docker info failed'
-        }
-    } catch {
-        error-msg 'Docker 守护进程不可用'
-        detail '请启动 Docker Desktop 后重试'
-        $failures++
+    info "Configured binding: $($data.network.configured_address):$(Format-CapabilityValue $data.network.configured_port)"
+    if ($data.network.actual_address) {
+        info "Actual binding: $($data.network.actual_address):$(Format-CapabilityValue $data.network.actual_port)"
     }
+    info "Exposure mode: $(Format-CapabilityValue $data.network.exposure_mode)"
 
-    $script:COMPOSE_CMD = detect-compose
-    if ($script:COMPOSE_CMD) {
-        $composeOk = $true
-        info "Docker Compose 可用 ($script:COMPOSE_CMD)"
+    if ($data.image.local_id) {
+        info 'CPA image is available locally'
+        detail "Reference: $($data.image.reference)"
+        detail "Image ID: $($data.image.local_id)"
+        detail "Repository digest: $(Format-CapabilityValue $data.image.repository_digest)"
+    }
+    if ($data.cpa.version -or $data.cpa.commit) {
+        info 'CPA build metadata is available'
+        detail "Version: $(Format-CapabilityValue $data.cpa.version)"
+        detail "Commit: $(Format-CapabilityValue $data.cpa.commit)"
     } else {
-        error-msg 'Docker Compose 不可用'
-        $failures++
+        info 'CPA build metadata is unavailable from the local API'
+    }
+    info "D2.2 release contract: CPA $($data.release_contract.cpa_version)@$($data.release_contract.cpa_commit), Management Center $($data.release_contract.management_center_version)@$($data.release_contract.management_center_commit)"
+    detail "contract-source=$($data.release_contract.source), target-pair-compatible=$(Format-CapabilityBoolean $data.release_contract.target_pair_compatible), runtime-compatibility=$(Format-CapabilityValue $data.release_contract.compatibility_status)"
+    if ($data.api.healthy -eq $true) { info 'CPA API is healthy' }
+    if ($data.api.models_http_status -eq 200) {
+        info "/v1/models returned 200; model count: $(Format-CapabilityValue $data.api.model_count)"
     }
 
-    if (Test-Path $script:CONFIG_FILE -PathType Container) {
-        error-msg 'config.yaml 当前是目录，不是文件'
-        detail '请删除空目录后重新运行部署'
-        $failures++
-    } elseif (Test-Path $script:CONFIG_FILE -PathType Leaf) {
-        $keyCount = @(Get-ConfigApiKeys).Count
-        if ($keyCount -gt 0) {
-            info "config.yaml 存在，API key 数量: $keyCount"
-        } else {
-            warn 'config.yaml 存在，但未读取到 api-keys'
-            $warnings++
-        }
+    info "Remote management: configured=$(Format-CapabilityBoolean $data.remote_management.configured), allow_remote=$(Format-CapabilityBoolean $data.remote_management.allow_remote), panel_disabled=$(Format-CapabilityBoolean $data.remote_management.control_panel_disabled), secret_configured=$(Format-CapabilityBoolean $data.remote_management.secret_configured)"
+    info "Management UI: enabled=$(Format-CapabilityBoolean $data.management_ui.enabled), reachable=$(Format-CapabilityBoolean $data.management_ui.reachable), HTTP=$(Format-CapabilityValue $data.management_ui.http_status)"
+    detail "Management Center version=$(Format-CapabilityValue $data.management_ui.version), source=$(Format-CapabilityValue $data.management_ui.version_source)"
+    detail "Safe local URL: $(Format-CapabilityValue $data.management_ui.local_url)"
+    detail "External HTTPS protection: $(Format-CapabilityBoolean $data.management_ui.external_https_protection)"
+    info "Official Management API support: $(Format-CapabilityBoolean $data.official_capabilities.management_api_available) (contract=$(Format-CapabilityValue $data.official_capabilities.contract_source))"
+    detail "auth-files=$(Format-CapabilityBoolean $data.official_capabilities.auth_files_inventory_supported), account-status=$(Format-CapabilityBoolean $data.official_capabilities.account_status_supported), priority-read=$(Format-CapabilityBoolean $data.official_capabilities.priority_read_supported), priority-write=$(Format-CapabilityBoolean $data.official_capabilities.priority_write_supported)"
+    detail "quota-reset=$(Format-CapabilityBoolean $data.official_capabilities.quota_reset_supported), routing-strategy=$(Format-CapabilityBoolean $data.official_capabilities.routing_strategy_supported)"
+    info "Routing: strategy=$(Format-CapabilityValue $data.routing.strategy), weighted-supported=$(Format-CapabilityBoolean $data.routing.weighted_round_robin_supported), weighted-configured=$(Format-CapabilityBoolean $data.routing.weighted_round_robin_configured)"
+    detail "priority-supported=$(Format-CapabilityBoolean $data.routing.priority_supported), priority-configured=$(Format-CapabilityBoolean $data.routing.priority_configured), credential-weights-configured=$(Format-CapabilityBoolean $data.routing.credential_weights_configured)"
+    detail "session-affinity-supported=$(Format-CapabilityBoolean $data.routing.session_affinity_supported), enabled=$(Format-CapabilityBoolean $data.routing.session_affinity_enabled), ttl=$(Format-CapabilityValue $data.routing.session_affinity_ttl), automatic-failover=$(Format-CapabilityBoolean $data.routing.automatic_failover_supported), WRR-traffic-validation=$($data.routing.wrr_traffic_validation)"
+    info "CPA plugin system: supported=$(Format-CapabilityBoolean $data.official_capabilities.plugin_system_supported), configured=$(Format-CapabilityBoolean $data.official_capabilities.plugin_system_configured), enabled=$(Format-CapabilityBoolean $data.official_capabilities.plugin_system_enabled)"
+    if ($data.plugins.inspection -eq 'available') {
+        detail "Installed plugin count: $($data.plugins.count)"
     } else {
-        error-msg 'config.yaml 不存在'
-        detail '请先运行: .\deploy.ps1'
-        $failures++
+        detail "Plugin inspection unavailable: $(Format-CapabilityValue $data.plugins.reason)"
     }
+    detail "Plugin resource pages use management authentication: $(Format-CapabilityBoolean $data.security.plugin_resource_pages_management_authenticated)"
+    if ($data.credentials.inspection -eq 'available') {
+        info 'Provider credential counts are available'
+        detail "source=$($data.credentials.source), antigravity=$($data.credentials.providers.antigravity), claude=$($data.credentials.providers.claude), codex=$($data.credentials.providers.codex), gemini=$($data.credentials.providers.gemini), kimi=$($data.credentials.providers.kimi), xai=$($data.credentials.providers.xai), unknown=$($data.credentials.providers.unknown), total=$($data.credentials.total)"
+    }
+    if ($data.recovery.latest_backup_time) { info "Latest CPA backup: $($data.recovery.latest_backup_time)" }
+    if ($data.recovery.previous_image_available -eq $true) { info 'Previous-image recovery target is available' }
 
-    if ($composeOk -and (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
-        Push-Location $script:SCRIPT_DIR
-        try {
-            $env:CPA_PORT = $script:CPA_PORT
-            Invoke-Compose -f $script:COMPOSE_FILE config --quiet
-            if ($LASTEXITCODE -eq 0) {
-                info 'docker-compose.yml 配置有效'
-            } else {
-                error-msg 'docker-compose.yml 配置检查失败'
-                $failures++
-            }
-        } catch {
-            error-msg 'docker-compose.yml 配置检查失败'
+    foreach ($finding in $data.warnings) {
+        if ($finding.severity -eq 'failure') {
+            error-msg "$($finding.code): $($finding.message)"
             $failures++
-        } finally {
-            Pop-Location
-        }
-    }
-
-    if ($dockerOk) {
-        $runningContainers = docker ps --format '{{.Names}}' 2>$null
-        if ($runningContainers -and ($runningContainers -match "^$script:CONTAINER_NAME$")) {
-            $containerRunning = $true
-            info "容器正在运行: $script:CONTAINER_NAME"
-            $portOutput = docker port $script:CONTAINER_NAME 8317/tcp 2>$null | Select-Object -First 1
-            if ($portOutput) {
-                $mappedPort = ($portOutput -split ':')[-1]
-                info "端口映射正常: 127.0.0.1:$mappedPort"
-            } else {
-                warn "未读取到容器端口映射，使用配置端口 $($script:CPA_PORT) 测试"
-                $warnings++
-            }
-        } else {
-            warn '容器未运行'
-            detail '可运行: .\deploy.ps1 start'
+        } elseif ($finding.severity -eq 'critical') {
+            warn "CRITICAL $($finding.code): $($finding.message)"
             $warnings++
-        }
-
-        $volumeExists = $false
-        try { $null = docker volume inspect $script:AUTH_VOLUME 2>$null; if ($LASTEXITCODE -eq 0) { $volumeExists = $true } } catch { }
-        if ($volumeExists) {
-            $credCount = docker run --rm -v "$($script:AUTH_VOLUME):/auth:ro" alpine sh -c "find /auth -maxdepth 1 -type f 2>/dev/null | grep -Ev '/(config|logs)$' | wc -l" 2>$null
-            $credCount = if ($credCount) { [int]($credCount.ToString().Trim()) } else { 0 }
-            if ($credCount -gt 0) {
-                info "OAuth 凭证卷存在，凭证文件数: $credCount"
-            } else {
-                warn 'OAuth 凭证卷存在，但未找到 Provider 凭证'
-                detail '可运行: .\deploy.ps1 login'
-                $warnings++
-            }
         } else {
-            warn 'OAuth 凭证卷不存在'
-            detail '完成 login 后会自动创建'
+            warn "$($finding.code): $($finding.message)"
             $warnings++
-        }
-    }
-
-    if ($containerRunning) {
-        Sync-ApiKeyFromConfig
-        if (-not $script:CPA_API_KEY) {
-            error-msg '无法读取 API key，跳过 /v1/models 测试'
-            $failures++
-        } else {
-            $httpCode = 0
-            $content = ''
-            try {
-                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$mappedPort/v1/models" `
-                    -Headers @{ Authorization = "Bearer $($script:CPA_API_KEY)" } `
-                    -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-                $httpCode = [int]$resp.StatusCode
-                $content = $resp.Content
-            } catch {
-                if ($_.Exception.Response) {
-                    $httpCode = [int]$_.Exception.Response.StatusCode
-                }
-            }
-
-            if ($httpCode -eq 200) {
-                if ($content -match '"id"\s*:') {
-                    info '/v1/models 返回 200，且模型列表非空'
-                } else {
-                    warn '/v1/models 返回 200，但模型列表可能为空'
-                    detail '通常表示 OAuth 登录未完成或凭证未加载'
-                    $warnings++
-                }
-            } elseif ($httpCode -eq 401) {
-                error-msg '/v1/models 认证失败 (401)'
-                detail '请检查 config.yaml 中的 API key'
-                $failures++
-            } elseif ($httpCode -eq 0) {
-                warn '/v1/models 无响应'
-                $warnings++
-            } else {
-                warn "/v1/models 返回异常状态: $httpCode"
-                $warnings++
-            }
         }
     }
 
     Write-Host ''
     divider
     if ($failures -eq 0) {
-        info "Doctor 完成: $warnings 个警告，0 个错误"
+        info "Doctor v2 completed: $warnings warning(s), 0 failure(s)"
     } else {
-        error-msg "Doctor 完成: $warnings 个警告，$failures 个错误"
+        error-msg "Doctor v2 completed: $warnings warning(s), $failures failure(s)"
         exit 1
     }
 }
@@ -1633,9 +2793,20 @@ function cmd-uninstall {
     Push-Location $script:SCRIPT_DIR
     try {
         $env:CPA_PORT = $script:CPA_PORT
-        try { Invoke-Compose -f $script:COMPOSE_FILE down -v 2>$null } catch { }
-        try { docker volume rm $script:AUTH_VOLUME 2>$null } catch { }
-    } finally { Pop-Location }
+        Invoke-Compose -f $script:COMPOSE_FILE down 2>$null
+    } catch { error-msg '停止现有栈失败，卸载已中止'; exit 1 }
+    finally { Pop-Location }
+
+    if (confirm-prompt "是否删除 OAuth 凭证卷 ($($script:AUTH_VOLUME))？" 'n') {
+        $authExists = $false
+        try { Invoke-NativeChecked 'docker' @('volume','inspect',$script:AUTH_VOLUME) | Out-Null; $authExists = $true } catch { }
+        if ($authExists) {
+            try { Invoke-NativeChecked 'docker' @('volume','rm',$script:AUTH_VOLUME) | Out-Null } catch { error-msg 'OAuth 凭证卷删除失败'; exit 1 }
+            $authRemains = $false
+            try { Invoke-NativeChecked 'docker' @('volume','inspect',$script:AUTH_VOLUME) | Out-Null; $authRemains = $true } catch { }
+            if ($authRemains) { error-msg 'OAuth 凭证卷仍然存在'; exit 1 }
+        }
+    } else { warn 'OAuth 凭证卷已保留；这不是无残留卸载' }
 
     if (confirm-prompt '是否删除配置文件 (config.yaml)？' 'n') {
         if (Test-Path $script:CONFIG_FILE -PathType Container) {
@@ -1718,6 +2889,510 @@ function cmd-setup-claude {
     Write-Host ''
 }
 
+# ========================== Sub2API companion stack ===========================
+
+function Require-Sub2ApiCompose {
+    try { $null = Get-Command docker -ErrorAction Stop }
+    catch { throw '未检测到 Docker' }
+
+    $null = docker info 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Docker 守护进程未运行' }
+
+    $null = docker compose version 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Sub2API 功能要求 Docker Compose v2' }
+
+    $script:COMPOSE_CMD = 'docker compose'
+    Assert-RegularFile $script:SUB2API_COMPOSE_FILE
+}
+
+function Invoke-Sub2ApiCompose {
+    $previousProject = $env:COMPOSE_PROJECT_NAME
+    $env:COMPOSE_PROJECT_NAME = $script:SUB2API_PROJECT_NAME
+    try {
+        $composeArgs = @('--env-file', $script:SUB2API_ENV_FILE, '-f', $script:SUB2API_COMPOSE_FILE)
+        $postgresMode = Get-Sub2ApiEnvValue 'SUB2API_POSTGRES_MODE'
+        $redisMode = Get-Sub2ApiEnvValue 'SUB2API_REDIS_MODE'
+        if (-not $postgresMode -or $postgresMode -eq 'managed') { $composeArgs += @('--profile', 'managed-postgres') }
+        if (-not $redisMode -or $redisMode -eq 'managed') { $composeArgs += @('--profile', 'managed-redis') }
+        Invoke-Compose @composeArgs @args
+    } finally {
+        if ($null -eq $previousProject) { Remove-Item Env:COMPOSE_PROJECT_NAME -ErrorAction SilentlyContinue }
+        else { $env:COMPOSE_PROJECT_NAME = $previousProject }
+    }
+}
+
+function Invoke-Sub2ApiComposeAll {
+    $previousProject = $env:COMPOSE_PROJECT_NAME
+    $env:COMPOSE_PROJECT_NAME = $script:SUB2API_PROJECT_NAME
+    try {
+        Invoke-Compose --env-file $script:SUB2API_ENV_FILE -f $script:SUB2API_COMPOSE_FILE `
+            --profile managed-postgres --profile managed-redis @args
+    } finally {
+        if ($null -eq $previousProject) { Remove-Item Env:COMPOSE_PROJECT_NAME -ErrorAction SilentlyContinue }
+        else { $env:COMPOSE_PROJECT_NAME = $previousProject }
+    }
+}
+
+function New-CryptoHex([int]$byteCount = 32) {
+    $bytes = New-Object byte[] $byteCount
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Set-Sub2ApiEnvPermissions($path) {
+    if (-not $IsWindows) {
+        & chmod 600 $path 2>$null
+        return
+    }
+    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($identity in @($currentIdentity, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'Allow')
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -Path $path -AclObject $acl
+}
+
+function Get-Sub2ApiEnvValue($key) {
+    if (-not (Test-Path $script:SUB2API_ENV_FILE -PathType Leaf)) { return '' }
+    foreach ($line in Get-Content $script:SUB2API_ENV_FILE) {
+        if ($line -match "^$([regex]::Escape($key))=(.*)$") {
+            return $Matches[1].Trim().Trim('"').Trim("'")
+        }
+    }
+    return ''
+}
+
+function Test-Sub2ApiPortInUse([int]$port) {
+    try {
+        $listeners = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+        if ($listeners | Where-Object Port -eq $port) { return $true }
+    } catch { }
+    try {
+        $publishedPorts = docker ps --format '{{.Ports}}' 2>$null
+        if ($publishedPorts -match "(^|[.:])$port->") { return $true }
+    } catch { }
+    return $false
+}
+
+function Get-AvailableSub2ApiPort {
+    foreach ($port in @(8321, 18321, 28321, 38321, 48321)) {
+        if (-not (Test-Sub2ApiPortInUse $port)) { return $port }
+    }
+    throw '无法找到可用的 Sub2API 宿主端口'
+}
+
+function New-Sub2ApiEnvironment {
+    $script:SUB2API_ENV_CREATED = $false
+    $script:SUB2API_NEW_ADMIN_PASSWORD = ''
+
+    if (Test-Path $script:SUB2API_ENV_FILE) {
+        Assert-RegularFile $script:SUB2API_ENV_FILE
+        Set-Sub2ApiEnvPermissions $script:SUB2API_ENV_FILE
+        return
+    }
+
+    Assert-SafeRepoPath $script:SUB2API_ENV_FILE $true
+    Assert-RegularFile $script:SUB2API_ENV_EXAMPLE_FILE
+
+    $postgresPassword = New-CryptoHex 24
+    $redisPassword = New-CryptoHex 24
+    $adminPassword = New-CryptoHex 18
+    $jwtSecret = New-CryptoHex 32
+    $totpKey = New-CryptoHex 32
+    $hostPort = Get-AvailableSub2ApiPort
+    $tempFile = "$($script:SUB2API_ENV_FILE).tmp.$([guid]::NewGuid().ToString('N'))"
+    Assert-SafeRepoPath $tempFile $true
+
+    $content = @"
+# Generated by CLI Proxy Manager. Keep this file private.
+SUB2API_BIND_HOST=127.0.0.1
+SUB2API_PORT=$hostPort
+SUB2API_IMAGE=weishaw/sub2api:latest
+SUB2API_POSTGRES_IMAGE=postgres:18-alpine
+SUB2API_REDIS_IMAGE=redis:8-alpine
+SUB2API_SERVER_MODE=release
+SUB2API_RUN_MODE=standard
+SUB2API_TZ=Asia/Shanghai
+# Set each dependency to managed or external independently.
+SUB2API_POSTGRES_MODE=managed
+SUB2API_DATABASE_HOST=postgres
+SUB2API_DATABASE_PORT=5432
+SUB2API_POSTGRES_USER=sub2api
+SUB2API_POSTGRES_PASSWORD=$postgresPassword
+SUB2API_POSTGRES_DB=sub2api
+SUB2API_DATABASE_SSLMODE=disable
+SUB2API_REDIS_MODE=managed
+SUB2API_REDIS_HOST=redis
+SUB2API_REDIS_PORT=6379
+SUB2API_REDIS_PASSWORD=$redisPassword
+SUB2API_REDIS_DB=0
+SUB2API_ADMIN_EMAIL=admin@sub2api.local
+SUB2API_ADMIN_PASSWORD=$adminPassword
+SUB2API_JWT_SECRET=$jwtSecret
+SUB2API_TOTP_ENCRYPTION_KEY=$totpKey
+SUB2API_URL_ALLOWLIST_ENABLED=false
+SUB2API_ALLOW_INSECURE_HTTP=true
+SUB2API_ALLOW_PRIVATE_HOSTS=true
+"@
+
+    try {
+        [IO.File]::WriteAllText($tempFile, $content, [Text.UTF8Encoding]::new($false))
+        Set-Sub2ApiEnvPermissions $tempFile
+        if (Test-Path $script:SUB2API_ENV_FILE) { throw 'sub2api.env 已被其他进程创建，请重试' }
+        Move-Item -LiteralPath $tempFile -Destination $script:SUB2API_ENV_FILE
+    } finally {
+        Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $script:SUB2API_ENV_CREATED = $true
+    $script:SUB2API_NEW_ADMIN_PASSWORD = $adminPassword
+}
+
+function Test-Sub2ApiEnvironment {
+    Assert-RegularFile $script:SUB2API_ENV_FILE
+    foreach ($key in @(
+        'SUB2API_POSTGRES_PASSWORD',
+        'SUB2API_ADMIN_PASSWORD',
+        'SUB2API_JWT_SECRET',
+        'SUB2API_TOTP_ENCRYPTION_KEY'
+    )) {
+        if (-not (Get-Sub2ApiEnvValue $key)) { throw "sub2api.env 缺少 $key" }
+    }
+
+    $postgresMode = Get-Sub2ApiEnvValue 'SUB2API_POSTGRES_MODE'
+    $redisMode = Get-Sub2ApiEnvValue 'SUB2API_REDIS_MODE'
+    if (-not $postgresMode) { $postgresMode = 'managed' }
+    if (-not $redisMode) { $redisMode = 'managed' }
+    if ($postgresMode -notin @('managed', 'external')) {
+        throw 'SUB2API_POSTGRES_MODE 只能是 managed 或 external'
+    }
+    if ($redisMode -notin @('managed', 'external')) {
+        throw 'SUB2API_REDIS_MODE 只能是 managed 或 external'
+    }
+
+    $databaseHost = Get-Sub2ApiEnvValue 'SUB2API_DATABASE_HOST'
+    $redisHost = Get-Sub2ApiEnvValue 'SUB2API_REDIS_HOST'
+    if ($postgresMode -eq 'external' -and -not $databaseHost) {
+        throw 'external PostgreSQL 模式要求 SUB2API_DATABASE_HOST'
+    }
+    if ($redisMode -eq 'external' -and -not $redisHost) {
+        throw 'external Redis 模式要求 SUB2API_REDIS_HOST'
+    }
+    if (-not $databaseHost) { $databaseHost = 'postgres' }
+    if (-not $redisHost) { $redisHost = 'redis' }
+    if ($postgresMode -eq 'managed' -and $databaseHost -ne 'postgres') {
+        throw 'managed PostgreSQL 模式要求 SUB2API_DATABASE_HOST=postgres'
+    }
+    if ($redisMode -eq 'managed' -and $redisHost -ne 'redis') {
+        throw 'managed Redis 模式要求 SUB2API_REDIS_HOST=redis'
+    }
+    if ($postgresMode -eq 'external' -and $databaseHost -in @('127.0.0.1', 'localhost')) {
+        throw '外部 PostgreSQL 在宿主机时请使用 host.docker.internal，不能使用 localhost'
+    }
+    if ($redisMode -eq 'external' -and $redisHost -in @('127.0.0.1', 'localhost')) {
+        throw '外部 Redis 在宿主机时请使用 host.docker.internal，不能使用 localhost'
+    }
+    if ($redisMode -eq 'managed' -and -not (Get-Sub2ApiEnvValue 'SUB2API_REDIS_PASSWORD')) {
+        throw 'managed Redis 模式要求 SUB2API_REDIS_PASSWORD'
+    }
+
+    foreach ($key in @('SUB2API_DATABASE_PORT', 'SUB2API_REDIS_PORT')) {
+        $dependencyPortText = Get-Sub2ApiEnvValue $key
+        if (-not $dependencyPortText) { continue }
+        $dependencyPort = 0
+        if (-not [int]::TryParse($dependencyPortText, [ref]$dependencyPort) -or $dependencyPort -lt 1 -or $dependencyPort -gt 65535) {
+            throw "$key 必须是 1..65535 的整数"
+        }
+    }
+
+    $bindHost = Get-Sub2ApiEnvValue 'SUB2API_BIND_HOST'
+    if (-not $bindHost) { $bindHost = '127.0.0.1' }
+    if ($bindHost -notin @('127.0.0.1', '0.0.0.0')) {
+        throw 'SUB2API_BIND_HOST 仅支持 127.0.0.1 或 0.0.0.0'
+    }
+
+    $portText = Get-Sub2ApiEnvValue 'SUB2API_PORT'
+    if (-not $portText) { $portText = '8321' }
+    $port = 0
+    if (-not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+        throw 'SUB2API_PORT 必须是 1..65535 的整数'
+    }
+}
+
+function Wait-Sub2ApiContainer($containerName, $label) {
+    Write-Host "     等待 $label 就绪 " -NoNewline
+    for ($i = 0; $i -lt 60; $i++) {
+        $health = docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $containerName 2>$null
+        if ($LASTEXITCODE -eq 0 -and $health -eq 'healthy') {
+            Write-Host ''
+            return $true
+        }
+        if ($health -in @('exited', 'dead')) {
+            Write-Host ''
+            return $false
+        }
+        Write-Host '·' -NoNewline
+        Start-Sleep -Seconds 2
+    }
+    Write-Host ''
+    return $false
+}
+
+function Start-Sub2ApiStack([switch]$ForceRecreate) {
+    $postgresMode = Get-Sub2ApiEnvValue 'SUB2API_POSTGRES_MODE'
+    $redisMode = Get-Sub2ApiEnvValue 'SUB2API_REDIS_MODE'
+    if (-not $postgresMode) { $postgresMode = 'managed' }
+    if (-not $redisMode) { $redisMode = 'managed' }
+    $managedServices = @()
+
+    if ($postgresMode -eq 'managed') { $managedServices += 'postgres' }
+    else { try { Invoke-Sub2ApiComposeAll stop postgres } catch { } }
+    if ($redisMode -eq 'managed') { $managedServices += 'redis' }
+    else { try { Invoke-Sub2ApiComposeAll stop redis } catch { } }
+
+    if ($managedServices.Count -gt 0) { Invoke-Sub2ApiCompose up -d @managedServices }
+    if ($postgresMode -eq 'managed' -and -not (Wait-Sub2ApiContainer $script:SUB2API_POSTGRES_CONTAINER_NAME 'PostgreSQL')) {
+        return $false
+    }
+    if ($redisMode -eq 'managed' -and -not (Wait-Sub2ApiContainer $script:SUB2API_REDIS_CONTAINER_NAME 'Redis')) {
+        return $false
+    }
+
+    $appArgs = @('up', '-d')
+    if ($ForceRecreate) { $appArgs += '--force-recreate' }
+    $appArgs += 'sub2api'
+    Invoke-Sub2ApiCompose @appArgs
+    return (Wait-Sub2ApiContainer $script:SUB2API_CONTAINER_NAME 'Sub2API')
+}
+
+function Show-Sub2ApiResult {
+    $bindHost = Get-Sub2ApiEnvValue 'SUB2API_BIND_HOST'
+    $port = Get-Sub2ApiEnvValue 'SUB2API_PORT'
+    $adminEmail = Get-Sub2ApiEnvValue 'SUB2API_ADMIN_EMAIL'
+    if (-not $bindHost -or $bindHost -eq '0.0.0.0') { $bindHost = '127.0.0.1' }
+    if (-not $port) { $port = '8321' }
+    if (-not $adminEmail) { $adminEmail = 'admin@sub2api.local' }
+
+    detail "访问地址: http://${bindHost}:$port"
+    detail "管理员邮箱: $adminEmail"
+    $postgresMode = Get-Sub2ApiEnvValue 'SUB2API_POSTGRES_MODE'
+    $redisMode = Get-Sub2ApiEnvValue 'SUB2API_REDIS_MODE'
+    if (-not $postgresMode) { $postgresMode = 'managed' }
+    if (-not $redisMode) { $redisMode = 'managed' }
+    detail "PostgreSQL 模式: $postgresMode"
+    detail "Redis 模式: $redisMode"
+    detail "配置文件: $($script:SUB2API_ENV_FILE)"
+    if ($script:SUB2API_ENV_CREATED) {
+        detail "首次管理员密码: $($script:SUB2API_NEW_ADMIN_PASSWORD)"
+        warn '请立即保存密码，并保护 sub2api.env'
+    }
+}
+
+function Initialize-Sub2Api {
+    Require-Sub2ApiCompose
+    New-Sub2ApiEnvironment
+    Test-Sub2ApiEnvironment
+    Invoke-Sub2ApiCompose config --quiet
+}
+
+function cmd-sub2api-init {
+    try {
+        step '生成 Sub2API 配置'
+        Assert-RegularFile $script:SUB2API_COMPOSE_FILE
+        New-Sub2ApiEnvironment
+        Test-Sub2ApiEnvironment
+        info 'Sub2API 配置已准备'
+        detail "配置文件: $($script:SUB2API_ENV_FILE)"
+        detail '默认模式: managed PostgreSQL + managed Redis'
+        warn '如需混合部署，请先编辑两个 MODE 和对应的 HOST/PORT，再运行 deploy'
+        if ($script:SUB2API_ENV_CREATED) {
+            detail "首次管理员密码: $($script:SUB2API_NEW_ADMIN_PASSWORD)"
+            warn '请立即保存密码，并保护 sub2api.env'
+        }
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-deploy {
+    try {
+        step '一键部署 Sub2API'
+        Initialize-Sub2Api
+        Invoke-Sub2ApiCompose pull
+        if (-not (Start-Sub2ApiStack)) {
+            try { Invoke-Sub2ApiCompose logs --tail 80 sub2api } catch { }
+            throw 'Sub2API 未通过健康检查'
+        }
+        info 'Sub2API 已启动'
+        Show-Sub2ApiResult
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-start {
+    try {
+        step '启动 Sub2API'
+        Initialize-Sub2Api
+        if (-not (Start-Sub2ApiStack)) { throw 'Sub2API 或托管依赖未通过健康检查' }
+        info 'Sub2API 已启动'
+        Show-Sub2ApiResult
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-stop {
+    try {
+        Require-Sub2ApiCompose
+        Assert-RegularFile $script:SUB2API_ENV_FILE
+        step '停止 Sub2API'
+        Invoke-Sub2ApiComposeAll stop
+        info 'Sub2API 已停止，数据卷已保留'
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-restart {
+    try {
+        step '重建并重启 Sub2API'
+        Initialize-Sub2Api
+        if (-not (Start-Sub2ApiStack -ForceRecreate)) { throw 'Sub2API 或托管依赖未通过健康检查' }
+        info 'Sub2API 已重新启动'
+        Show-Sub2ApiResult
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-status {
+    try {
+        Require-Sub2ApiCompose
+        Assert-RegularFile $script:SUB2API_ENV_FILE
+        step 'Sub2API 状态'
+        Invoke-Sub2ApiComposeAll ps
+        $health = docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $script:SUB2API_CONTAINER_NAME 2>$null
+        if (-not $health) { $health = 'not-created' }
+        detail "应用健康状态: $health"
+        Show-Sub2ApiResult
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-logs($service = 'sub2api') {
+    try {
+        Require-Sub2ApiCompose
+        Assert-RegularFile $script:SUB2API_ENV_FILE
+        Invoke-Sub2ApiComposeAll logs -f --tail 200 $service
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-update {
+    try {
+        step '更新 Sub2API 栈'
+        Initialize-Sub2Api
+        Invoke-Sub2ApiCompose pull
+        if (-not (Start-Sub2ApiStack)) {
+            try { Invoke-Sub2ApiCompose logs --tail 80 sub2api } catch { }
+            throw '更新后健康检查失败'
+        }
+        info 'Sub2API 已更新并通过健康检查'
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-doctor {
+    try {
+        step '检查 Sub2API 部署'
+        Require-Sub2ApiCompose
+        Assert-RegularFile $script:SUB2API_ENV_FILE
+        Test-Sub2ApiEnvironment
+        Invoke-Sub2ApiCompose config --quiet
+        info 'Compose 配置有效'
+        $bindHost = Get-Sub2ApiEnvValue 'SUB2API_BIND_HOST'
+        if ($bindHost -eq '0.0.0.0') {
+            warn 'Sub2API 当前对所有网络接口开放'
+            detail '请使用防火墙和 HTTPS 反向代理'
+        } else { info 'Sub2API 仅绑定本机' }
+        cmd-sub2api-status
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function cmd-sub2api-uninstall {
+    try {
+        Require-Sub2ApiCompose
+        Assert-RegularFile $script:SUB2API_ENV_FILE
+        Write-Host ''
+        warn '即将卸载 Sub2API 容器'
+        if (-not (confirm-prompt '确认停止并删除 Sub2API 容器和网络？' 'n')) {
+            info '取消卸载'
+            return
+        }
+
+        $deleteVolumes = confirm-prompt '是否永久删除 Sub2API、PostgreSQL 和 Redis 数据卷？' 'n'
+        if ($deleteVolumes) {
+            Invoke-Sub2ApiComposeAll down -v
+            info 'Sub2API 容器、网络和数据卷已删除'
+        } else {
+            Invoke-Sub2ApiComposeAll down
+            info 'Sub2API 容器和网络已删除，数据卷仍保留'
+            warn '数据卷已保留'
+        }
+
+        if (confirm-prompt '是否删除包含密钥的 sub2api.env？' 'n') {
+            Assert-RegularFile $script:SUB2API_ENV_FILE
+            Remove-Item -LiteralPath $script:SUB2API_ENV_FILE -Force
+            info 'sub2api.env 已删除'
+        }
+    } catch { error-msg $_.Exception.Message; exit 1 }
+}
+
+function show-sub2api-help {
+    Write-Host ''
+    Write-Host '  Sub2API companion stack'
+    Write-Host '  .\deploy.ps1 sub2api [action]' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '    deploy     生成密钥并一键部署（默认）' -ForegroundColor Cyan
+    Write-Host '    init       只生成配置，便于先选择依赖模式' -ForegroundColor Cyan
+    Write-Host '    start      启动或创建容器' -ForegroundColor Cyan
+    Write-Host '    stop       停止容器并保留数据' -ForegroundColor Cyan
+    Write-Host '    restart    重建并重启容器' -ForegroundColor Cyan
+    Write-Host '    status     查看容器和健康状态' -ForegroundColor Cyan
+    Write-Host '    logs [服务] 查看日志（默认 sub2api）' -ForegroundColor Cyan
+    Write-Host '    update     拉取最新镜像并重建' -ForegroundColor Cyan
+    Write-Host '    doctor     检查配置和暴露范围' -ForegroundColor Cyan
+    Write-Host '    uninstall  卸载；数据和密钥分别确认' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  依赖模式在 sub2api.env 中分别设置:' -ForegroundColor DarkGray
+    Write-Host '    SUB2API_POSTGRES_MODE=managed|external'
+    Write-Host '    SUB2API_REDIS_MODE=managed|external'
+    Write-Host ''
+}
+
+function cmd-sub2api {
+    param(
+        [Parameter(Position = 0)]
+        [string]$action = 'deploy',
+
+        [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+        [string[]]$remaining = @()
+    )
+    if (-not $action) { $action = 'deploy' }
+    switch ($action) {
+        'deploy' { cmd-sub2api-deploy }
+        'install' { cmd-sub2api-deploy }
+        'init' { cmd-sub2api-init }
+        'configure' { cmd-sub2api-init }
+        'start' { cmd-sub2api-start }
+        'stop' { cmd-sub2api-stop }
+        'restart' { cmd-sub2api-restart }
+        'status' { cmd-sub2api-status }
+        'logs' {
+            $service = if ($remaining.Count -gt 0) { $remaining[0] } else { 'sub2api' }
+            cmd-sub2api-logs $service
+        }
+        'update' { cmd-sub2api-update }
+        'doctor' { cmd-sub2api-doctor }
+        'uninstall' { cmd-sub2api-uninstall }
+        'help' { show-sub2api-help }
+        '--help' { show-sub2api-help }
+        '-h' { show-sub2api-help }
+        default { error-msg "未知 Sub2API 操作: $action"; show-sub2api-help; exit 1 }
+    }
+}
+
 # ========================== 帮助信息 ==========================================
 
 function show-help {
@@ -1737,7 +3412,8 @@ function show-help {
     Write-Host '    restart      重启服务' -ForegroundColor Cyan
     Write-Host '    status       查看服务状态' -ForegroundColor Cyan
     Write-Host '    logs         查看实时日志' -ForegroundColor Cyan
-    Write-Host '    doctor       自检 Docker/配置/凭证/API' -ForegroundColor Cyan
+    Write-Host '    capabilities [--json] 只读 CPA 能力和暴露检查' -ForegroundColor Cyan
+    Write-Host '    doctor       Doctor v2 只读诊断' -ForegroundColor Cyan
     Write-Host '    backup [文件] 备份配置和 OAuth 凭证' -ForegroundColor Cyan
     Write-Host '    restore <文件> 恢复配置和 OAuth 凭证' -ForegroundColor Cyan
     Write-Host '    check-update  只检查镜像是否有更新' -ForegroundColor Cyan
@@ -1745,11 +3421,13 @@ function show-help {
     Write-Host '    rollback     手动切换到上一个镜像版本' -ForegroundColor Cyan
     Write-Host '    uninstall    完全卸载' -ForegroundColor Cyan
     Write-Host '    setup-claude 自动配置 Claude Code 环境' -ForegroundColor Cyan
+    Write-Host '    sub2api [操作] 管理独立的 Sub2API 一键部署' -ForegroundColor Cyan
     Write-Host '    help         显示此帮助' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  环境变量:'
     Write-Host '    CPA_PORT     服务端口 (默认: 8317)' -ForegroundColor Cyan
     Write-Host '    CPA_API_KEY  API 密钥' -ForegroundColor Cyan
+    Write-Host '    CPA_EXPOSURE_MODE 可选: public-proxy (仅用于能力分类)' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  示例:'
     Write-Host '    # 完整部署' -ForegroundColor DarkGray
@@ -1759,15 +3437,18 @@ function show-help {
     Write-Host '    $env:CPA_PORT=9000; .\deploy.ps1 start'
     Write-Host ''
     Write-Host '    # 自检并备份' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 capabilities --json'
     Write-Host '    .\deploy.ps1 doctor'
     Write-Host '    .\deploy.ps1 backup'
+    Write-Host ''
+    Write-Host '    # 一键部署独立 Sub2API 栈' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 sub2api deploy'
     Write-Host ''
 }
 
 # ========================== 入口 ==============================================
 
-function main {
-    # 加载 .env
+function Import-ProjectEnvironment {
     $envFile = Join-Path $script:SCRIPT_DIR '.env'
     if (Test-Path $envFile -PathType Leaf) {
         Get-Content $envFile | ForEach-Object {
@@ -1775,22 +3456,22 @@ function main {
             if ($line -and -not $line.StartsWith('#')) {
                 $parts = $line -split '=', 2
                 if ($parts.Length -eq 2) {
-                    $key = $parts[0].Trim()
-                    $val = $parts[1].Trim()
+                    $key = $parts[0].Trim(); $val = $parts[1].Trim().Trim('"').Trim("'")
                     Set-Item -Path "env:$key" -Value $val
-                    # Sync to script vars
                     switch ($key) {
                         'CPA_PORT'           { $script:CPA_PORT = $val }
                         'CPA_API_KEY'        { $script:CPA_API_KEY = $val }
                         'CPA_MANAGEMENT_KEY' { $script:CPA_MANAGEMENT_KEY = $val }
                         'CPA_IMAGE'          { $script:DOCKER_IMAGE = $val }
-
                     }
                 }
             }
         }
     }
+}
 
+function main {
+    Import-ProjectEnvironment
     $command = if ($args.Count -gt 0) { $args[0] } else { '' }
 
     switch ($command) {
@@ -1801,6 +3482,11 @@ function main {
         'restart'   { cmd-restart @args }
         'status'    { cmd-status @args }
         'logs'      { cmd-logs @args }
+        'capabilities' {
+            [string[]]$capabilityOptions = @()
+            if ($args.Count -gt 1) { $capabilityOptions = @($args[1..($args.Count - 1)]) }
+            cmd-capabilities -Options $capabilityOptions
+        }
         'doctor'    { cmd-doctor }
         'backup'    {
             $backupPath = if ($args.Count -gt 1) { $args[1] } else { '' }
@@ -1815,6 +3501,11 @@ function main {
         'rollback'  { cmd-rollback }
         'uninstall' { cmd-uninstall @args }
         'setup-claude' { cmd-setup-claude }
+        'sub2api' {
+            [string[]]$sub2apiArgs = @()
+            if ($args.Count -gt 1) { $sub2apiArgs = @($args[1..($args.Count - 1)]) }
+            cmd-sub2api @sub2apiArgs
+        }
         'help'      { show-help }
         '--help'    { show-help }
         '-h'        { show-help }

@@ -13,6 +13,7 @@
 #          bash deploy.sh stop     # 停止服务
 #          bash deploy.sh status   # 查看状态
 #          bash deploy.sh logs     # 实时日志
+#          bash deploy.sh capabilities [--json] # 只读能力检查
 #          bash deploy.sh doctor   # 自检诊断
 #          bash deploy.sh backup   # 备份配置和凭证
 #          bash deploy.sh restore <file> # 恢复配置和凭证
@@ -24,6 +25,7 @@
 #          bash deploy.sh disable-auto-update # 禁用自动更新
 #          bash deploy.sh uninstall # 完全卸载
 #          bash deploy.sh setup-claude # 配置 Claude Code
+#          bash deploy.sh sub2api deploy # 一键部署 Sub2API
 #
 # =============================================================================
 
@@ -39,6 +41,10 @@ readonly VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_IMAGE="${CPA_IMAGE:-eceasy/cli-proxy-api:latest}"
 readonly ROLLBACK_IMAGE="eceasy/cli-proxy-api:rollback"
+readonly RELEASE_CONTRACT_CPA_VERSION="v7.2.111"
+readonly RELEASE_CONTRACT_CPA_COMMIT="4a315136730baa8b3a436d12b74e5a702c70be5c"
+readonly RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION="v1.20.4"
+readonly RELEASE_CONTRACT_MANAGEMENT_CENTER_COMMIT="826ea3c0d0bdd6409a0a2703ada90faaf5aede2d"
 
 readonly COMPOSE_PROJECT_NAME="cli-proxy-manager"
 export COMPOSE_PROJECT_NAME
@@ -47,6 +53,13 @@ readonly AUTH_VOLUME="cli-proxy-manager-auth"
 readonly OAUTH_PORT=51121
 readonly CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
+readonly SUB2API_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.sub2api.yml"
+readonly SUB2API_ENV_FILE="${SCRIPT_DIR}/sub2api.env"
+readonly SUB2API_ENV_EXAMPLE_FILE="${SCRIPT_DIR}/sub2api.env.example"
+readonly SUB2API_PROJECT_NAME="sub2api-manager"
+readonly SUB2API_CONTAINER_NAME="sub2api-manager"
+readonly SUB2API_POSTGRES_CONTAINER_NAME="sub2api-manager-postgres"
+readonly SUB2API_REDIS_CONTAINER_NAME="sub2api-manager-redis"
 readonly AUTO_UPDATE_LOG="${SCRIPT_DIR}/logs/auto-update.log"
 readonly FAILED_UPDATE_FILE="${SCRIPT_DIR}/logs/failed-update-digest"
 readonly AUTO_UPDATE_MARKER_BEGIN="# >>> cli-proxy-manager auto-update >>>"
@@ -57,6 +70,8 @@ CPA_PORT="${CPA_PORT:-8317}"
 CPA_API_KEY="${CPA_API_KEY:-}"
 CPA_MANAGEMENT_KEY="${CPA_MANAGEMENT_KEY:-}"
 API_KEYS=()
+SUB2API_ENV_CREATED=false
+SUB2API_NEW_ADMIN_PASSWORD=""
 
 # ========================== 颜色 & 样式 ======================================
 
@@ -130,6 +145,31 @@ detect_compose() {
     else
         echo ""
     fi
+}
+
+path_within_repo() {
+    local path="$1" parent resolved
+    parent="$(dirname "${path}")"
+    resolved="$(cd "${parent}" 2>/dev/null && pwd -P)/$(basename "${path}")" || return 1
+    [[ "${resolved}" == "${SCRIPT_DIR}"/* || "${resolved}" == "${SCRIPT_DIR}" ]]
+}
+
+assert_safe_path() {
+    local path="$1" allow_missing="${2:-false}" current="${SCRIPT_DIR}" rel component
+    path_within_repo "${path}" || { error "路径超出仓库根目录: ${path}"; return 1; }
+    rel="${path#${SCRIPT_DIR}/}"
+    IFS='/' read -r -a parts <<< "${rel}"
+    for component in "${parts[@]}"; do
+        current="${current}/${component}"
+        if [[ -L "${current}" ]]; then error "拒绝符号链接路径: ${current}"; return 1; fi
+        if [[ -e "${current}" && ! -f "${current}" && ! -d "${current}" ]]; then error "拒绝非普通路径: ${current}"; return 1; fi
+    done
+    if [[ "${allow_missing}" != "true" && ! -e "${path}" ]]; then error "路径不存在: ${path}"; return 1; fi
+}
+
+assert_regular_file() {
+    local path="$1"
+    assert_safe_path "${path}" false && [[ -f "${path}" && ! -L "${path}" ]] || { error "要求普通文件: ${path}"; return 1; }
 }
 
 check_prereqs() {
@@ -252,6 +292,1487 @@ sync_api_key_from_config() {
 
 config_api_key_count() {
     read_config_api_keys | wc -l | tr -d '[:space:]'
+}
+
+# ========================== CPA 只读能力探针 =================================
+
+capability_json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "${value}"
+}
+
+capability_json_string_or_null() {
+    local value="${1:-}"
+    if [[ -z "${value}" || "${value}" == "unknown" ]]; then
+        printf 'null'
+    else
+        printf '"%s"' "$(capability_json_escape "${value}")"
+    fi
+}
+
+capability_json_bool_or_null() {
+    case "${1:-unknown}" in
+        true|false) printf '%s' "$1" ;;
+        *) printf 'null' ;;
+    esac
+}
+
+capability_json_number_or_null() {
+    local value="${1:-}"
+    if [[ "${value}" =~ ^[0-9]+$ ]]; then
+        printf '%s' "${value}"
+    else
+        printf 'null'
+    fi
+}
+
+capability_display_value() {
+    local value="${1:-}"
+    if [[ -z "${value}" || "${value}" == "unknown" ]]; then
+        printf 'unavailable'
+    else
+        printf '%s' "${value}"
+    fi
+}
+
+capability_display_bool() {
+    case "${1:-unknown}" in
+        true) printf 'yes' ;;
+        false) printf 'no' ;;
+        *) printf 'unavailable' ;;
+    esac
+}
+
+capability_normalize_bool() {
+    local value
+    value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    case "${value}" in
+        true|yes|on|1) printf 'true' ;;
+        false|no|off|0) printf 'false' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+capability_is_loopback() {
+    case "${1:-}" in
+        localhost|127.*|::1|\[::1\]|0:0:0:0:0:0:0:1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+capability_add_finding() {
+    CAP_FINDING_CODES+=("$1")
+    CAP_FINDING_SEVERITIES+=("$2")
+    CAP_FINDING_MESSAGES+=("$3")
+}
+
+capability_yaml_value() {
+    local value="$1"
+    value="$(printf '%s' "${value}" | sed 's/[[:space:]]#.*$//')"
+    value="$(trim_value "${value}")"
+    if [[ ${#value} -ge 2 ]]; then
+        if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+    fi
+    printf '%s' "${value}"
+}
+
+probe_remote_management_config() {
+    CAP_REMOTE_CONFIGURED="false"
+    CAP_REMOTE_ALLOW="unknown"
+    CAP_REMOTE_PANEL_DISABLED="unknown"
+    CAP_REMOTE_SECRET_CONFIGURED="unknown"
+
+    [[ -f "${CONFIG_FILE}" ]] || return 0
+
+    local in_remote=false line value
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ^remote-management:[[:space:]]*($|#) ]]; then
+            in_remote=true
+            CAP_REMOTE_CONFIGURED="true"
+            continue
+        fi
+        if $in_remote && [[ "${line}" =~ ^[^[:space:]#] ]]; then
+            break
+        fi
+        $in_remote || continue
+
+        if [[ "${line}" =~ ^[[:space:]]+allow-remote:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            CAP_REMOTE_ALLOW="$(capability_normalize_bool "${value}")"
+        elif [[ "${line}" =~ ^[[:space:]]+disable-control-panel:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            CAP_REMOTE_PANEL_DISABLED="$(capability_normalize_bool "${value}")"
+        elif [[ "${line}" =~ ^[[:space:]]+secret-key:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            if [[ -n "${value}" ]]; then
+                CAP_REMOTE_SECRET_CONFIGURED="true"
+            else
+                CAP_REMOTE_SECRET_CONFIGURED="false"
+            fi
+        fi
+    done < "${CONFIG_FILE}"
+}
+
+probe_routing_config() {
+    CAP_ROUTING_STRATEGY="unknown"
+    CAP_SESSION_AFFINITY_ENABLED="unknown"
+    CAP_SESSION_AFFINITY_TTL="unknown"
+
+    [[ -f "${CONFIG_FILE}" ]] || return 0
+
+    CAP_ROUTING_STRATEGY="round-robin"
+    CAP_SESSION_AFFINITY_ENABLED="false"
+    CAP_SESSION_AFFINITY_TTL="1h"
+
+    local in_routing=false line value
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ^routing:[[:space:]]*($|#) ]]; then
+            in_routing=true
+            continue
+        fi
+        if $in_routing && [[ "${line}" =~ ^[^[:space:]#] ]]; then
+            break
+        fi
+        $in_routing || continue
+
+        if [[ "${line}" =~ ^[[:space:]]+strategy:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            case "${value}" in
+                round-robin|weighted-round-robin|fill-first) CAP_ROUTING_STRATEGY="${value}" ;;
+                *) CAP_ROUTING_STRATEGY="unknown" ;;
+            esac
+        elif [[ "${line}" =~ ^[[:space:]]+session-affinity:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            CAP_SESSION_AFFINITY_ENABLED="$(capability_normalize_bool "${value}")"
+        elif [[ "${line}" =~ ^[[:space:]]+session-affinity-ttl:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            if [[ "${value}" =~ ^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$ ]]; then
+                CAP_SESSION_AFFINITY_TTL="${value}"
+            else
+                CAP_SESSION_AFFINITY_TTL="unknown"
+            fi
+        fi
+    done < "${CONFIG_FILE}"
+}
+
+probe_plugin_config() {
+    CAP_PLUGIN_CONFIGURED="false"
+    CAP_PLUGIN_ENABLED="unknown"
+    CAP_PLUGIN_CONFIG_SECTION="false"
+
+    [[ -f "${CONFIG_FILE}" ]] || return 0
+
+    local in_plugins=false line value
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ^plugins:[[:space:]]*($|#) ]]; then
+            in_plugins=true
+            CAP_PLUGIN_CONFIG_SECTION="true"
+            CAP_PLUGIN_CONFIGURED="true"
+            continue
+        fi
+        if $in_plugins && [[ "${line}" =~ ^[^[:space:]#] ]]; then
+            break
+        fi
+        $in_plugins || continue
+
+        if [[ "${line}" =~ ^[[:space:]]+enabled:[[:space:]]*(.*)$ ]]; then
+            value="$(capability_yaml_value "${BASH_REMATCH[1]}")"
+            CAP_PLUGIN_ENABLED="$(capability_normalize_bool "${value}")"
+        fi
+    done < "${CONFIG_FILE}"
+}
+
+select_capability_binding() {
+    local line host port priority selected="" selected_priority=0
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line//$'\r'/}"
+        [[ -z "${line}" ]] && continue
+        host="" port=""
+        if [[ "${line}" =~ ^\[(.*)\]:([0-9]+)$ ]]; then
+            host="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+        elif [[ "${line}" =~ ^(.*):([0-9]+)$ ]]; then
+            host="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+        fi
+        [[ -z "${host}" || -z "${port}" ]] && continue
+
+        if [[ "${host}" == "0.0.0.0" ]]; then
+            priority=4
+        elif [[ "${host}" == "::" ]]; then
+            priority=3
+        elif capability_is_loopback "${host}"; then
+            priority=1
+        else
+            priority=2
+        fi
+        if (( priority > selected_priority )); then
+            selected="${host}|${port}"
+            selected_priority=${priority}
+        fi
+    done
+    printf '%s' "${selected}"
+}
+
+capability_probe_host() {
+    local address="${1:-}"
+    case "${address}" in
+        ""|0.0.0.0) printf '127.0.0.1' ;;
+        ::) printf '[::1]' ;;
+        \[*\]) printf '%s' "${address}" ;;
+        *:*) printf '[%s]' "${address}" ;;
+        *) printf '%s' "${address}" ;;
+    esac
+}
+
+capability_header_value() {
+    local headers="$1" wanted="$2" line name value lowered
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line//$'\r'/}"
+        [[ "${line}" == *:* ]] || continue
+        name="${line%%:*}"
+        value="${line#*:}"
+        lowered="$(printf '%s' "${name}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "${lowered}" == "${wanted}" ]]; then
+            printf '%s' "$(trim_value "${value}")"
+            return 0
+        fi
+    done <<< "${headers}"
+}
+
+count_models_in_response() {
+    awk '
+        {
+            line=$0
+            while (match(line, /"id"[[:space:]]*:/)) {
+                count++
+                line=substr(line, RSTART + RLENGTH)
+            }
+        }
+        END { print count + 0 }
+    '
+}
+
+capability_python_command() {
+    local candidate
+    for candidate in python3 python; do
+        if command -v "${candidate}" &>/dev/null && "${candidate}" -c 'import json' &>/dev/null; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+reset_provider_credential_counts() {
+    CAP_CREDENTIAL_INSPECTION="unknown"
+    CAP_CREDENTIAL_SOURCE="unknown"
+    CAP_CREDENTIAL_ANTIGRAVITY="unknown"
+    CAP_CREDENTIAL_CLAUDE="unknown"
+    CAP_CREDENTIAL_CODEX="unknown"
+    CAP_CREDENTIAL_GEMINI="unknown"
+    CAP_CREDENTIAL_KIMI="unknown"
+    CAP_CREDENTIAL_XAI="unknown"
+    CAP_CREDENTIAL_UNKNOWN="unknown"
+    CAP_CREDENTIAL_TOTAL="unknown"
+    CAP_ADDITIONAL_PROVIDER_TYPES=()
+    CAP_ADDITIONAL_PROVIDER_COUNTS=()
+}
+
+probe_provider_credential_fallback() {
+    reset_provider_credential_counts
+
+    [[ "${CAP_CONTAINER_RUNNING}" == "true" ]] || return 0
+
+    local output line provider count seen=0 total=0
+    if ! output="$(docker exec "${CONTAINER_NAME}" sh -c '
+        auth=/root/.cli-proxy-api
+        [ -d "$auth" ] || exit 2
+        antigravity=$(find "$auth" -maxdepth 1 -type f \( -name "antigravity.json" -o -name "antigravity-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]")
+        claude=$(find "$auth" -maxdepth 1 -type f \( -name "claude.json" -o -name "claude-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]")
+        codex=$(find "$auth" -maxdepth 1 -type f \( -name "codex.json" -o -name "codex-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]")
+        gemini=$(find "$auth" -maxdepth 1 -type f \( -name "gemini.json" -o -name "gemini-*.json" -o -name "geminicli.json" -o -name "geminicli-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]")
+        kimi=$(find "$auth" -maxdepth 1 -type f \( -name "kimi.json" -o -name "kimi-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]")
+        xai=$(find "$auth" -maxdepth 1 -type f \( -name "xai.json" -o -name "xai-*.json" -o -name "x-ai.json" -o -name "x-ai-*.json" \) 2>/dev/null | wc -l | tr -d "[:space:]")
+        all=$(find "$auth" -maxdepth 1 -type f -name "*.json" 2>/dev/null | wc -l | tr -d "[:space:]")
+        printf "antigravity=%s\nclaude=%s\ncodex=%s\ngemini=%s\nkimi=%s\nxai=%s\nall=%s\n" \
+            "${antigravity:-0}" "${claude:-0}" "${codex:-0}" "${gemini:-0}" "${kimi:-0}" "${xai:-0}" "${all:-0}"
+    ' 2>/dev/null)"; then
+        return 0
+    fi
+
+    local all_count="unknown" known_total=0
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        provider="${line%%=*}"
+        count="${line#*=}"
+        [[ "${count}" =~ ^[0-9]+$ ]] || continue
+        case "${provider}" in
+            antigravity) CAP_CREDENTIAL_ANTIGRAVITY="${count}" ;;
+            claude) CAP_CREDENTIAL_CLAUDE="${count}" ;;
+            codex) CAP_CREDENTIAL_CODEX="${count}" ;;
+            gemini) CAP_CREDENTIAL_GEMINI="${count}" ;;
+            kimi) CAP_CREDENTIAL_KIMI="${count}" ;;
+            xai) CAP_CREDENTIAL_XAI="${count}" ;;
+            all) all_count="${count}"; continue ;;
+            *) continue ;;
+        esac
+        seen=$((seen + 1))
+        known_total=$((known_total + count))
+    done <<< "${output}"
+
+    if [[ ${seen} -eq 6 && "${all_count}" =~ ^[0-9]+$ ]]; then
+        if (( all_count >= known_total )); then
+            CAP_CREDENTIAL_UNKNOWN=$((all_count - known_total))
+        else
+            CAP_CREDENTIAL_UNKNOWN=0
+        fi
+        CAP_CREDENTIAL_INSPECTION="available"
+        CAP_CREDENTIAL_SOURCE="filename_fallback"
+        CAP_CREDENTIAL_TOTAL="${all_count}"
+    fi
+}
+
+parse_auth_files_inventory() {
+    local body="$1" python output line key value
+    python="$(capability_python_command || true)"
+    [[ -n "${python}" ]] || return 1
+
+    output="$(printf '%s' "${body}" | "${python}" -c '
+import json, re, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+files = payload.get("files", []) if isinstance(payload, dict) else []
+if not isinstance(files, list):
+    raise SystemExit(2)
+known = {key: 0 for key in ("antigravity", "claude", "codex", "gemini", "kimi", "xai")}
+aliases = {"gemini-cli": "gemini", "geminicli": "gemini", "x-ai": "xai", "x_ai": "xai"}
+additional = {}
+unknown = 0
+status_supported = False
+priority_configured = False
+weight_configured = False
+for item in files:
+    if not isinstance(item, dict):
+        unknown += 1
+        continue
+    status_supported = status_supported or "status" in item or "status_message" in item
+    priority_configured = priority_configured or "priority" in item
+    weight_configured = weight_configured or "weight" in item
+    raw = item.get("type") or item.get("provider")
+    if not isinstance(raw, str):
+        unknown += 1
+        continue
+    provider = raw.strip().lower()
+    provider = aliases.get(provider, provider)
+    if provider in known:
+        known[provider] += 1
+    elif re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", provider):
+        additional[provider] = additional.get(provider, 0) + 1
+    else:
+        unknown += 1
+for key in known:
+    print(f"known:{key}={known[key]}")
+print(f"unknown={unknown}")
+print(f"total={len(files)}")
+print(f"status_supported={str(status_supported).lower()}")
+print(f"priority_configured={str(priority_configured).lower()}")
+print(f"weight_configured={str(weight_configured).lower()}")
+for key in sorted(additional):
+    print(f"additional:{key}={additional[key]}")
+' 2>/dev/null)" || return 1
+
+    reset_provider_credential_counts
+    CAP_CREDENTIAL_ANTIGRAVITY=0
+    CAP_CREDENTIAL_CLAUDE=0
+    CAP_CREDENTIAL_CODEX=0
+    CAP_CREDENTIAL_GEMINI=0
+    CAP_CREDENTIAL_KIMI=0
+    CAP_CREDENTIAL_XAI=0
+    CAP_CREDENTIAL_UNKNOWN=0
+    CAP_AUTH_FILES_STATUS_FIELDS="false"
+    CAP_AUTH_FILES_PRIORITY_FIELDS="false"
+    CAP_AUTH_FILES_WEIGHT_FIELDS="false"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line//$'\r'/}"
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            known:antigravity) CAP_CREDENTIAL_ANTIGRAVITY="${value}" ;;
+            known:claude) CAP_CREDENTIAL_CLAUDE="${value}" ;;
+            known:codex) CAP_CREDENTIAL_CODEX="${value}" ;;
+            known:gemini) CAP_CREDENTIAL_GEMINI="${value}" ;;
+            known:kimi) CAP_CREDENTIAL_KIMI="${value}" ;;
+            known:xai) CAP_CREDENTIAL_XAI="${value}" ;;
+            unknown) CAP_CREDENTIAL_UNKNOWN="${value}" ;;
+            total) CAP_CREDENTIAL_TOTAL="${value}" ;;
+            status_supported) CAP_AUTH_FILES_STATUS_FIELDS="${value}" ;;
+            priority_configured) CAP_AUTH_FILES_PRIORITY_FIELDS="${value}" ;;
+            weight_configured) CAP_AUTH_FILES_WEIGHT_FIELDS="${value}" ;;
+            additional:*)
+                CAP_ADDITIONAL_PROVIDER_TYPES+=("${key#additional:}")
+                CAP_ADDITIONAL_PROVIDER_COUNTS+=("${value}")
+                ;;
+        esac
+    done <<< "${output}"
+
+    [[ "${CAP_CREDENTIAL_TOTAL}" =~ ^[0-9]+$ ]] || return 1
+    CAP_CREDENTIAL_INSPECTION="available"
+    CAP_CREDENTIAL_SOURCE="management_api"
+}
+
+parse_management_config_capability() {
+    local body="$1" python output line key value
+    python="$(capability_python_command || true)"
+    [[ -n "${python}" ]] || return 1
+
+    output="$(printf '%s' "${body}" | "${python}" -c '
+import json, re, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+if not isinstance(payload, dict):
+    raise SystemExit(2)
+
+priority_configured = False
+weight_configured = False
+credential_sections = (
+    "gemini-api-key",
+    "interactions-api-key",
+    "claude-api-key",
+    "vertex-api-key",
+    "codex-api-key",
+    "xai-api-key",
+)
+for section in credential_sections:
+    entries = payload.get(section, [])
+    if not isinstance(entries, list):
+        continue
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        priority_configured = priority_configured or "priority" in entry
+        weight_configured = weight_configured or "weight" in entry
+
+compatibility_entries = payload.get("openai-compatibility", [])
+if isinstance(compatibility_entries, list):
+    for provider in compatibility_entries:
+        if not isinstance(provider, dict):
+            continue
+        priority_configured = priority_configured or "priority" in provider
+        api_key_entries = provider.get("api-key-entries", [])
+        if isinstance(api_key_entries, list):
+            for entry in api_key_entries:
+                if isinstance(entry, dict):
+                    weight_configured = weight_configured or "weight" in entry
+
+routing = payload.get("routing", {})
+if not isinstance(routing, dict):
+    routing = {}
+strategy = routing.get("strategy", "round-robin")
+if strategy not in ("round-robin", "weighted-round-robin", "fill-first"):
+    strategy = "unknown"
+session_affinity = routing.get("session-affinity", False)
+if not isinstance(session_affinity, bool):
+    session_affinity = None
+session_ttl = routing.get("session-affinity-ttl", "1h")
+if not isinstance(session_ttl, str) or not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|ms|s|m|h))+", session_ttl):
+    session_ttl = "unknown"
+
+print("priority_configured=" + str(priority_configured).lower())
+print("weight_configured=" + str(weight_configured).lower())
+print("strategy=" + strategy)
+print("session_affinity=" + (str(session_affinity).lower() if isinstance(session_affinity, bool) else "unknown"))
+print("session_affinity_ttl=" + session_ttl)
+' 2>/dev/null)" || return 1
+
+    CAP_CONFIG_PRIORITY_FIELDS="false"
+    CAP_CONFIG_WEIGHT_FIELDS="false"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line//$'\r'/}"
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            priority_configured) CAP_CONFIG_PRIORITY_FIELDS="${value}" ;;
+            weight_configured) CAP_CONFIG_WEIGHT_FIELDS="${value}" ;;
+            strategy) CAP_ROUTING_STRATEGY="${value}" ;;
+            session_affinity) CAP_SESSION_AFFINITY_ENABLED="${value}" ;;
+            session_affinity_ttl) CAP_SESSION_AFFINITY_TTL="${value}" ;;
+        esac
+    done <<< "${output}"
+}
+
+parse_routing_strategy_capability() {
+    local body="$1" python strategy
+    python="$(capability_python_command || true)"
+    [[ -n "${python}" ]] || return 1
+    strategy="$(printf '%s' "${body}" | "${python}" -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+strategy = payload.get("strategy") if isinstance(payload, dict) else None
+if strategy not in ("round-robin", "weighted-round-robin", "fill-first"):
+    raise SystemExit(2)
+print(strategy)
+' 2>/dev/null)" || return 1
+    CAP_ROUTING_STRATEGY="${strategy}"
+}
+
+parse_management_center_version() {
+    local body="$1" python version
+    python="$(capability_python_command || true)"
+    [[ -n "${python}" ]] || return 1
+    version="$(printf '%s' "${body}" | "${python}" -c '
+import re, sys
+body = sys.stdin.read()
+match = re.search(r"footer\.version.{0,300}?tileValue.{0,160}?children:\s*[`\"](v[0-9]+\.[0-9]+\.[0-9]+)[`\"]", body, re.S)
+if not match:
+    raise SystemExit(2)
+print(match.group(1))
+' 2>/dev/null)" || return 1
+    CAP_MANAGEMENT_UI_VERSION="${version}"
+    CAP_MANAGEMENT_UI_VERSION_SOURCE="management_html"
+}
+
+combine_capability_flags() {
+    local first="${1:-unknown}" second="${2:-unknown}"
+    if [[ "${first}" == "true" || "${second}" == "true" ]]; then
+        printf 'true'
+    elif [[ "${first}" == "false" && "${second}" == "false" ]]; then
+        printf 'false'
+    else
+        printf 'unknown'
+    fi
+}
+
+reset_plugin_inventory() {
+    CAP_PLUGIN_INSPECTION="unavailable"
+    CAP_PLUGIN_INSPECTION_REASON="unknown"
+    CAP_PLUGIN_SOURCE="unknown"
+    CAP_PLUGIN_COUNT="unknown"
+    CAP_PLUGIN_IDS=()
+    CAP_PLUGIN_NAMES=()
+    CAP_PLUGIN_VERSIONS=()
+    CAP_PLUGIN_STATES=()
+    CAP_PLUGIN_MENU_COUNTS=()
+}
+
+parse_plugin_inventory() {
+    local body="$1" python output line id name version enabled menu_count plugins_enabled configured
+    python="$(capability_python_command || true)"
+    [[ -n "${python}" ]] || return 1
+
+    output="$(printf '%s' "${body}" | "${python}" -c '
+import json, re, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+if not isinstance(payload, dict) or not isinstance(payload.get("plugins", []), list):
+    raise SystemExit(2)
+plugins = payload.get("plugins", [])
+enabled = payload.get("plugins_enabled")
+print("plugins_enabled=" + (str(enabled).lower() if isinstance(enabled, bool) else "unknown"))
+configured = False
+safe_items = []
+for index, item in enumerate(plugins, 1):
+    if not isinstance(item, dict):
+        continue
+    configured = configured or item.get("configured") is True
+    raw_id = item.get("id")
+    plugin_id = raw_id.strip() if isinstance(raw_id, str) else ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", plugin_id):
+        plugin_id = f"redacted-plugin-{index}"
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    raw_name = metadata.get("name") or item.get("name")
+    name = raw_name.strip() if isinstance(raw_name, str) else plugin_id
+    if (not name or len(name) > 80 or re.search(r"[@\\/]|://|[\x00-\x1f]", name)
+            or not re.fullmatch(r"[A-Za-z0-9 ._()+-]+", name)):
+        name = plugin_id
+    raw_version = metadata.get("version") or item.get("version")
+    version = raw_version.strip() if isinstance(raw_version, str) else "unknown"
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,31}", version):
+        version = "unknown"
+    state = item.get("effective_enabled")
+    if not isinstance(state, bool):
+        state = item.get("enabled")
+    state_text = str(state).lower() if isinstance(state, bool) else "unknown"
+    menus = item.get("menus")
+    menu_count = len(menus) if isinstance(menus, list) else 0
+    safe_items.append((plugin_id, name, version, state_text, menu_count))
+print("configured=" + str(configured).lower())
+print("count=" + str(len(safe_items)))
+for item in safe_items:
+    print("plugin\t" + "\t".join(str(value) for value in item))
+' 2>/dev/null)" || return 1
+
+    reset_plugin_inventory
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line//$'\r'/}"
+        case "${line}" in
+            plugins_enabled=*) CAP_PLUGIN_ENABLED="${line#*=}" ;;
+            configured=*)
+                configured="${line#*=}"
+                [[ "${configured}" == "true" ]] && CAP_PLUGIN_CONFIGURED="true"
+                ;;
+            count=*) CAP_PLUGIN_COUNT="${line#*=}" ;;
+            plugin$'\t'*)
+                IFS=$'\t' read -r _ id name version enabled menu_count <<< "${line}"
+                CAP_PLUGIN_IDS+=("${id}")
+                CAP_PLUGIN_NAMES+=("${name}")
+                CAP_PLUGIN_VERSIONS+=("${version}")
+                CAP_PLUGIN_STATES+=("${enabled}")
+                CAP_PLUGIN_MENU_COUNTS+=("${menu_count}")
+                ;;
+        esac
+    done <<< "${output}"
+
+    [[ "${CAP_PLUGIN_COUNT}" =~ ^[0-9]+$ ]] || return 1
+    CAP_PLUGIN_INSPECTION="available"
+    CAP_PLUGIN_INSPECTION_REASON="unknown"
+    CAP_PLUGIN_SOURCE="management_api"
+}
+
+probe_cpa_build_metadata_from_logs() {
+    [[ "${CAP_CONTAINER_RUNNING}" == "true" ]] || return 0
+
+    local output line version commit candidate
+    output="$(docker logs --tail 5000 "${CONTAINER_NAME}" 2>&1 || true)"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ CLIProxyAPI[[:space:]]+Version:[[:space:]]*([vV]?[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            version="${BASH_REMATCH[1]}"
+            if [[ "${line}" =~ Commit:[[:space:]]*([0-9a-fA-F]+) ]]; then
+                candidate="${BASH_REMATCH[1]}"
+                if (( ${#candidate} >= 7 && ${#candidate} <= 40 )); then
+                    commit="${candidate}"
+                fi
+            fi
+        fi
+    done <<< "${output}"
+    [[ -n "${version:-}" ]] && CAP_CPA_VERSION="${version}"
+    [[ -n "${commit:-}" ]] && CAP_CPA_COMMIT="${commit}"
+}
+
+probe_plugin_binary_support() {
+    [[ "${CAP_CONTAINER_RUNNING}" == "true" ]] || return 0
+
+    local result
+    result="$(docker exec "${CONTAINER_NAME}" sh -c '
+        if ! command -v ldd >/dev/null 2>&1; then
+            printf unknown
+        elif ldd /proc/1/exe >/dev/null 2>&1; then
+            printf true
+        else
+            printf false
+        fi
+    ' 2>/dev/null || true)"
+    case "${result}" in
+        true|false) CAP_PLUGIN_SYSTEM_SUPPORTED="${result}" ;;
+    esac
+}
+
+capability_is_audited_v72102() {
+    [[ "${CAP_CPA_VERSION}" == "v7.2.102" || "${CAP_CPA_VERSION}" == "7.2.102" ]] || return 1
+    [[ "${CAP_CPA_COMMIT}" == 8423cce* ]]
+}
+
+capability_is_audited_v72111() {
+    [[ "${CAP_CPA_VERSION}" == "${RELEASE_CONTRACT_CPA_VERSION}" || "${CAP_CPA_VERSION}" == "${RELEASE_CONTRACT_CPA_VERSION#v}" ]] || return 1
+    [[ "${RELEASE_CONTRACT_CPA_COMMIT}" == "${CAP_CPA_COMMIT}"* ]]
+}
+
+apply_audited_cpa_contract() {
+    local audited_version=""
+    if capability_is_audited_v72111; then
+        audited_version="v7.2.111"
+        CAP_CPA_VERSION="${RELEASE_CONTRACT_CPA_VERSION}"
+        CAP_CPA_COMMIT="${RELEASE_CONTRACT_CPA_COMMIT}"
+        CAP_WEIGHTED_ROUND_ROBIN_SUPPORTED="true"
+        CAP_PRIORITY_SUPPORTED="true"
+        CAP_SESSION_AFFINITY_SUPPORTED="true"
+        CAP_AUTOMATIC_FAILOVER_SUPPORTED="true"
+    elif capability_is_audited_v72102; then
+        audited_version="v7.2.102"
+        CAP_PRIORITY_SUPPORTED="true"
+    else
+        return 0
+    fi
+
+    if [[ "${CAP_MANAGEMENT_AUTHENTICATED}" == "true" ]]; then
+        CAP_OFFICIAL_CONTRACT_SOURCE="live_and_audited"
+    else
+        CAP_OFFICIAL_CONTRACT_SOURCE="audited_${audited_version}"
+    fi
+    CAP_MANAGEMENT_API_AVAILABLE="true"
+    CAP_AUTH_FILES_INVENTORY_SUPPORT="true"
+    CAP_ACCOUNT_STATUS_SUPPORT="true"
+    CAP_PRIORITY_READ_SUPPORT="true"
+    CAP_PRIORITY_WRITE_SUPPORT="true"
+    CAP_QUOTA_RESET_SUPPORT="true"
+    CAP_ROUTING_STRATEGY_SUPPORT="true"
+    CAP_PLUGIN_RESOURCE_MANAGEMENT_AUTHENTICATED="false"
+    CAP_PLUGIN_RESOURCE_VERIFICATION="audited_${audited_version}"
+    if [[ "${CAP_PLUGIN_CONFIG_SECTION}" == "false" ]]; then
+        CAP_PLUGIN_CONFIGURED="false"
+        CAP_PLUGIN_ENABLED="false"
+    fi
+}
+
+derive_release_contract_capability() {
+    case "${CAP_ROUTING_STRATEGY}" in
+        weighted-round-robin) CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED="true" ;;
+        round-robin|fill-first) CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED="false" ;;
+        *) CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED="unknown" ;;
+    esac
+
+    CAP_PRIORITY_CONFIGURED="$(combine_capability_flags "${CAP_CONFIG_PRIORITY_FIELDS}" "${CAP_AUTH_FILES_PRIORITY_FIELDS}")"
+    CAP_CREDENTIAL_WEIGHTS_CONFIGURED="$(combine_capability_flags "${CAP_CONFIG_WEIGHT_FIELDS}" "${CAP_AUTH_FILES_WEIGHT_FIELDS}")"
+
+    CAP_RELEASE_COMPATIBILITY_STATUS="unknown"
+    if [[ "${CAP_CPA_VERSION}" == "${RELEASE_CONTRACT_CPA_VERSION}" || "${CAP_CPA_VERSION}" == "${RELEASE_CONTRACT_CPA_VERSION#v}" ]]; then
+        if [[ -z "${CAP_CPA_COMMIT}" || "${CAP_CPA_COMMIT}" == "unknown" ]]; then
+            return 0
+        fi
+        if [[ "${RELEASE_CONTRACT_CPA_COMMIT}" != "${CAP_CPA_COMMIT}"* ]]; then
+            CAP_RELEASE_COMPATIBILITY_STATUS="cpa_commit_mismatch"
+        elif [[ "${CAP_MANAGEMENT_UI_VERSION}" == "unknown" ]]; then
+            CAP_RELEASE_COMPATIBILITY_STATUS="unknown"
+        elif [[ "${CAP_MANAGEMENT_UI_VERSION}" == "${RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION}" ]]; then
+            CAP_RELEASE_COMPATIBILITY_STATUS="compatible"
+        else
+            CAP_RELEASE_COMPATIBILITY_STATUS="management_center_mismatch"
+        fi
+    elif [[ "${CAP_CPA_VERSION}" != "unknown" ]]; then
+        CAP_RELEASE_COMPATIBILITY_STATUS="cpa_version_mismatch"
+    fi
+}
+
+capability_authenticated_get() {
+    local uri="$1" response
+    CAP_HTTP_STATUS="unknown"
+    CAP_HTTP_BODY=""
+    response="$(curl -sS --max-time 5 -w $'\n__CPA_STATUS__:%{http_code}' \
+        -H "Authorization: Bearer ${CPA_MANAGEMENT_KEY}" "${uri}" 2>/dev/null || true)"
+    if [[ "${response}" == *$'\n__CPA_STATUS__:'* ]]; then
+        CAP_HTTP_STATUS="${response##*$'\n__CPA_STATUS__:'}"
+        CAP_HTTP_BODY="${response%$'\n__CPA_STATUS__:'*}"
+    fi
+}
+
+probe_authenticated_management_api() {
+    local base_url="$1" response status headers plugin_support
+    if [[ -z "${CPA_MANAGEMENT_KEY:-}" ]]; then
+        CAP_MANAGEMENT_AUTHENTICATED="unknown"
+        CAP_PLUGIN_INSPECTION_REASON="management_key_unavailable"
+        return 0
+    fi
+
+    response="$(curl -sS --max-time 5 -D - -o /dev/null -w $'\n__CPA_STATUS__:%{http_code}' \
+        -H "Authorization: Bearer ${CPA_MANAGEMENT_KEY}" "${base_url}/v0/management/config" 2>/dev/null || true)"
+    if [[ "${response}" != *$'\n__CPA_STATUS__:'* ]]; then
+        CAP_PLUGIN_INSPECTION_REASON="management_api_unavailable"
+        return 0
+    fi
+    status="${response##*$'\n__CPA_STATUS__:'}"
+    headers="${response%$'\n__CPA_STATUS__:'*}"
+    CAP_MANAGEMENT_CONFIG_HTTP_STATUS="${status}"
+
+    if [[ "${status}" == "200" ]]; then
+        CAP_MANAGEMENT_AUTHENTICATED="true"
+        CAP_MANAGEMENT_API_AVAILABLE="true"
+        if capability_is_audited_v72102 || capability_is_audited_v72111; then
+            CAP_OFFICIAL_CONTRACT_SOURCE="live_and_audited"
+        else
+            CAP_OFFICIAL_CONTRACT_SOURCE="live"
+        fi
+
+        local header_value
+        header_value="$(capability_header_value "${headers}" 'x-cpa-version')"
+        [[ -n "${header_value}" ]] && CAP_CPA_VERSION="${header_value}"
+        header_value="$(capability_header_value "${headers}" 'x-cpa-commit')"
+        [[ -n "${header_value}" ]] && CAP_CPA_COMMIT="${header_value}"
+        plugin_support="$(capability_header_value "${headers}" 'x-cpa-support-plugin')"
+        case "${plugin_support}" in
+            1|true) CAP_PLUGIN_SYSTEM_SUPPORTED="true" ;;
+            0|false) CAP_PLUGIN_SYSTEM_SUPPORTED="false" ;;
+        esac
+
+        capability_authenticated_get "${base_url}/v0/management/config"
+        if [[ "${CAP_HTTP_STATUS}" == "200" ]]; then
+            parse_management_config_capability "${CAP_HTTP_BODY}" || true
+        fi
+
+        capability_authenticated_get "${base_url}/v0/management/auth-files"
+        if [[ "${CAP_HTTP_STATUS}" == "200" ]] && parse_auth_files_inventory "${CAP_HTTP_BODY}"; then
+            CAP_AUTH_FILES_INVENTORY_SUPPORT="true"
+            [[ "${CAP_AUTH_FILES_STATUS_FIELDS}" == "true" ]] && CAP_ACCOUNT_STATUS_SUPPORT="true"
+            [[ "${CAP_AUTH_FILES_PRIORITY_FIELDS}" == "true" ]] && CAP_PRIORITY_READ_SUPPORT="true"
+        fi
+
+        capability_authenticated_get "${base_url}/v0/management/plugins"
+        if [[ "${CAP_HTTP_STATUS}" == "200" ]] && parse_plugin_inventory "${CAP_HTTP_BODY}"; then
+            CAP_PLUGIN_SYSTEM_SUPPORTED="true"
+        else
+            CAP_PLUGIN_INSPECTION_REASON="plugin_api_unavailable"
+        fi
+
+        capability_authenticated_get "${base_url}/v0/management/routing/strategy"
+        if [[ "${CAP_HTTP_STATUS}" == "200" ]]; then
+            CAP_ROUTING_STRATEGY_SUPPORT="true"
+            parse_routing_strategy_capability "${CAP_HTTP_BODY}" || true
+        fi
+    elif [[ "${status}" == "401" || "${status}" == "403" ]]; then
+        CAP_MANAGEMENT_AUTHENTICATED="false"
+        CAP_MANAGEMENT_API_AVAILABLE="true"
+        CAP_PLUGIN_INSPECTION_REASON="management_key_rejected"
+    else
+        CAP_PLUGIN_INSPECTION_REASON="management_api_unavailable"
+    fi
+}
+
+capability_file_epoch() {
+    local file="$1" epoch=""
+    epoch="$(stat -c '%Y' "${file}" 2>/dev/null || true)"
+    if [[ ! "${epoch}" =~ ^[0-9]+$ ]]; then
+        epoch="$(stat -f '%m' "${file}" 2>/dev/null || true)"
+    fi
+    [[ "${epoch}" =~ ^[0-9]+$ ]] && printf '%s' "${epoch}"
+}
+
+capability_epoch_to_iso() {
+    local epoch="$1" result=""
+    result="$(date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+    if [[ -z "${result}" ]]; then
+        result="$(date -u -r "${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+    fi
+    printf '%s' "${result}"
+}
+
+probe_latest_cpa_backup() {
+    CAP_LATEST_BACKUP_TIME="unknown"
+    local backup_dir="${SCRIPT_DIR}/backups" file base epoch latest_epoch=0
+    [[ -d "${backup_dir}" ]] || return 0
+
+    while IFS= read -r file || [[ -n "${file}" ]]; do
+        base="$(basename "${file}")"
+        [[ "${base}" == sub2api* ]] && continue
+        epoch="$(capability_file_epoch "${file}")"
+        if [[ "${epoch}" =~ ^[0-9]+$ ]] && (( epoch > latest_epoch )); then
+            latest_epoch=${epoch}
+        fi
+    done < <(find "${backup_dir}" -maxdepth 1 -type f -name '*.tgz' -print 2>/dev/null)
+
+    if (( latest_epoch > 0 )); then
+        CAP_LATEST_BACKUP_TIME="$(capability_epoch_to_iso "${latest_epoch}")"
+        [[ -n "${CAP_LATEST_BACKUP_TIME}" ]] || CAP_LATEST_BACKUP_TIME="unknown"
+    fi
+}
+
+probe_cpa_capabilities() {
+    CAP_SCHEMA_VERSION=1
+    CAP_GENERATED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    CAP_MANAGER_VERSION="${VERSION}"
+    CAP_DOCKER_CLI="false"
+    CAP_DOCKER_DAEMON="false"
+    CAP_COMPOSE_AVAILABLE="false"
+    CAP_COMPOSE_VALID="unknown"
+    CAP_CONFIG_STATE="missing"
+    CAP_CONFIG_API_KEY_COUNT="unknown"
+    CAP_CONFIGURED_BIND_ADDRESS="${CPA_BIND_HOST:-127.0.0.1}"
+    CAP_CONFIGURED_BIND_PORT="${CPA_PORT:-8317}"
+    CAP_ACTUAL_BIND_ADDRESS="unknown"
+    CAP_ACTUAL_BIND_PORT="unknown"
+    CAP_EXPOSURE_MODE="unknown"
+    CAP_CONTAINER_RUNNING="unknown"
+    CAP_IMAGE_REFERENCE="${DOCKER_IMAGE}"
+    CAP_IMAGE_LOCAL_ID="unknown"
+    CAP_IMAGE_REPOSITORY_DIGEST="unknown"
+    CAP_CPA_VERSION="unknown"
+    CAP_CPA_COMMIT="unknown"
+    CAP_API_HEALTHY="unknown"
+    CAP_HEALTH_HTTP_STATUS="unknown"
+    CAP_MODELS_HTTP_STATUS="unknown"
+    CAP_MODEL_COUNT="unknown"
+    CAP_MANAGEMENT_UI_ENABLED="unknown"
+    CAP_MANAGEMENT_UI_REACHABLE="unknown"
+    CAP_MANAGEMENT_UI_HTTP_STATUS="unknown"
+    CAP_MANAGEMENT_UI_LOCAL_URL="unknown"
+    CAP_MANAGEMENT_UI_VERSION="unknown"
+    CAP_MANAGEMENT_UI_VERSION_SOURCE="unknown"
+    CAP_MANAGEMENT_UI_REMOTE_ALLOWED="unknown"
+    CAP_MANAGEMENT_UI_EXTERNAL_HTTPS="unknown"
+    CAP_MANAGEMENT_UI_PUBLIC_WARNING="unknown"
+    CAP_MANAGEMENT_AUTHENTICATED="unknown"
+    CAP_MANAGEMENT_CONFIG_HTTP_STATUS="unknown"
+    CAP_OFFICIAL_CONTRACT_SOURCE="unknown"
+    CAP_MANAGEMENT_API_AVAILABLE="unknown"
+    CAP_AUTH_FILES_INVENTORY_SUPPORT="unknown"
+    CAP_ACCOUNT_STATUS_SUPPORT="unknown"
+    CAP_PRIORITY_READ_SUPPORT="unknown"
+    CAP_PRIORITY_WRITE_SUPPORT="unknown"
+    CAP_QUOTA_RESET_SUPPORT="unknown"
+    CAP_ROUTING_STRATEGY_SUPPORT="unknown"
+    CAP_PLUGIN_SYSTEM_SUPPORTED="unknown"
+    CAP_PLUGIN_SYSTEM_CONFIGURED="unknown"
+    CAP_PLUGIN_SYSTEM_ENABLED="unknown"
+    CAP_PLUGIN_RESOURCE_MANAGEMENT_AUTHENTICATED="unknown"
+    CAP_PLUGIN_RESOURCE_VERIFICATION="unknown"
+    CAP_CRITICAL_PUBLIC_PLUGIN_RESOURCE_EXPOSURE="unknown"
+    CAP_AUTH_FILES_STATUS_FIELDS="unknown"
+    CAP_AUTH_FILES_PRIORITY_FIELDS="unknown"
+    CAP_AUTH_FILES_WEIGHT_FIELDS="unknown"
+    CAP_CONFIG_PRIORITY_FIELDS="unknown"
+    CAP_CONFIG_WEIGHT_FIELDS="unknown"
+    CAP_ROUTING_STRATEGY="unknown"
+    CAP_WEIGHTED_ROUND_ROBIN_SUPPORTED="unknown"
+    CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED="unknown"
+    CAP_PRIORITY_SUPPORTED="unknown"
+    CAP_PRIORITY_CONFIGURED="unknown"
+    CAP_CREDENTIAL_WEIGHTS_CONFIGURED="unknown"
+    CAP_SESSION_AFFINITY_SUPPORTED="unknown"
+    CAP_SESSION_AFFINITY_ENABLED="unknown"
+    CAP_SESSION_AFFINITY_TTL="unknown"
+    CAP_AUTOMATIC_FAILOVER_SUPPORTED="unknown"
+    CAP_WRR_TRAFFIC_VALIDATION="not_run"
+    CAP_RELEASE_COMPATIBILITY_STATUS="unknown"
+    CAP_PREVIOUS_IMAGE_AVAILABLE="unknown"
+    CAP_FINDING_CODES=()
+    CAP_FINDING_SEVERITIES=()
+    CAP_FINDING_MESSAGES=()
+    reset_provider_credential_counts
+    reset_plugin_inventory
+
+    if [[ -d "${CONFIG_FILE}" ]]; then
+        CAP_CONFIG_STATE="directory"
+    elif [[ -f "${CONFIG_FILE}" ]]; then
+        CAP_CONFIG_STATE="file"
+        CAP_CONFIG_API_KEY_COUNT="$(config_api_key_count)"
+    fi
+
+    if command -v docker &>/dev/null; then
+        CAP_DOCKER_CLI="true"
+        if docker info &>/dev/null 2>&1; then
+            CAP_DOCKER_DAEMON="true"
+        fi
+    fi
+
+    COMPOSE_CMD="$(detect_compose)"
+    if [[ -n "${COMPOSE_CMD}" ]]; then
+        CAP_COMPOSE_AVAILABLE="true"
+        if [[ -f "${CONFIG_FILE}" ]]; then
+            if (cd "${SCRIPT_DIR}" && CPA_BIND_HOST="${CAP_CONFIGURED_BIND_ADDRESS}" CPA_PORT="${CAP_CONFIGURED_BIND_PORT}" CPA_IMAGE="${DOCKER_IMAGE}" ${COMPOSE_CMD} -f "${COMPOSE_FILE}" config --quiet >/dev/null 2>&1); then
+                CAP_COMPOSE_VALID="true"
+            else
+                CAP_COMPOSE_VALID="false"
+            fi
+        fi
+    fi
+
+    if [[ "${CAP_DOCKER_DAEMON}" == "true" ]]; then
+        local container_info image_ref image_id running port_output selected image_target repo_digests
+        container_info="$(docker inspect --format '{{.Config.Image}}|{{.Image}}|{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+        if [[ -n "${container_info}" ]]; then
+            IFS='|' read -r image_ref image_id running <<< "${container_info}"
+            CAP_IMAGE_REFERENCE="${image_ref:-${DOCKER_IMAGE}}"
+            CAP_IMAGE_LOCAL_ID="${image_id:-unknown}"
+            CAP_CONTAINER_RUNNING="$(capability_normalize_bool "${running}")"
+        else
+            CAP_CONTAINER_RUNNING="false"
+            CAP_IMAGE_LOCAL_ID="$(docker image inspect --format '{{.Id}}' "${CAP_IMAGE_REFERENCE}" 2>/dev/null | head -1 || true)"
+            [[ -n "${CAP_IMAGE_LOCAL_ID}" ]] || CAP_IMAGE_LOCAL_ID="unknown"
+        fi
+
+        if [[ "${CAP_CONTAINER_RUNNING}" == "true" ]]; then
+            port_output="$(docker port "${CONTAINER_NAME}" 8317/tcp 2>/dev/null || true)"
+            selected="$(select_capability_binding <<< "${port_output}")"
+            if [[ -n "${selected}" ]]; then
+                CAP_ACTUAL_BIND_ADDRESS="${selected%%|*}"
+                CAP_ACTUAL_BIND_PORT="${selected#*|}"
+            fi
+        fi
+
+        image_target="${CAP_IMAGE_LOCAL_ID}"
+        [[ "${image_target}" == "unknown" ]] && image_target="${CAP_IMAGE_REFERENCE}"
+        repo_digests="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image_target}" 2>/dev/null || true)"
+        CAP_IMAGE_REPOSITORY_DIGEST="$(printf '%s\n' "${repo_digests}" | awk 'NF { print; exit }')"
+        [[ -n "${CAP_IMAGE_REPOSITORY_DIGEST}" ]] || CAP_IMAGE_REPOSITORY_DIGEST="unknown"
+
+        if docker image inspect "${ROLLBACK_IMAGE}" &>/dev/null 2>&1; then
+            CAP_PREVIOUS_IMAGE_AVAILABLE="true"
+        else
+            CAP_PREVIOUS_IMAGE_AVAILABLE="false"
+        fi
+
+        probe_cpa_build_metadata_from_logs
+        probe_plugin_binary_support
+    fi
+
+    local classification_address="${CAP_ACTUAL_BIND_ADDRESS}"
+    [[ "${classification_address}" == "unknown" ]] && classification_address="${CAP_CONFIGURED_BIND_ADDRESS}"
+    local exposure_hint
+    exposure_hint="$(printf '%s' "${CPA_EXPOSURE_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ -z "${classification_address}" || "${classification_address}" == "unknown" ]]; then
+        CAP_EXPOSURE_MODE="unknown"
+    elif capability_is_loopback "${classification_address}"; then
+        if [[ "${exposure_hint}" == "public-proxy" ]]; then
+            CAP_EXPOSURE_MODE="public-proxy"
+        else
+            CAP_EXPOSURE_MODE="local"
+        fi
+    else
+        CAP_EXPOSURE_MODE="direct-public"
+    fi
+
+    probe_remote_management_config
+    probe_routing_config
+    probe_plugin_config
+    probe_latest_cpa_backup
+    apply_audited_cpa_contract
+
+    local probe_port="${CAP_ACTUAL_BIND_PORT}" probe_address="${CAP_ACTUAL_BIND_ADDRESS}"
+    [[ "${probe_port}" == "unknown" ]] && probe_port="${CAP_CONFIGURED_BIND_PORT}"
+    [[ "${probe_address}" == "unknown" ]] && probe_address="${CAP_CONFIGURED_BIND_ADDRESS}"
+
+    if [[ "${CAP_CONTAINER_RUNNING}" == "true" && "${probe_port}" =~ ^[0-9]+$ ]]; then
+        if command -v curl &>/dev/null; then
+            local request_host base_url health_code management_response management_code management_body response body model_code
+            request_host="$(capability_probe_host "${probe_address}")"
+            base_url="http://${request_host}:${probe_port}"
+            CAP_MANAGEMENT_UI_LOCAL_URL="${base_url}/management.html"
+
+            health_code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "${base_url}/healthz" 2>/dev/null || true)"
+            [[ "${health_code}" =~ ^[0-9]{3}$ ]] && CAP_HEALTH_HTTP_STATUS="${health_code}"
+
+            management_response="$(curl -sS --max-time 5 -w $'\n__CPA_STATUS__:%{http_code}' "${base_url}/management.html" 2>/dev/null || true)"
+            if [[ "${management_response}" == *$'\n__CPA_STATUS__:'* ]]; then
+                management_code="${management_response##*$'\n__CPA_STATUS__:'}"
+                management_body="${management_response%$'\n__CPA_STATUS__:'*}"
+            else
+                management_code="unknown"
+                management_body=""
+            fi
+            if [[ "${management_code}" =~ ^[0-9]{3}$ ]]; then
+                CAP_MANAGEMENT_UI_HTTP_STATUS="${management_code}"
+                if [[ "${management_code}" == "200" ]]; then
+                    CAP_MANAGEMENT_UI_REACHABLE="true"
+                    CAP_MANAGEMENT_UI_ENABLED="true"
+                    parse_management_center_version "${management_body}" || true
+                else
+                    CAP_MANAGEMENT_UI_REACHABLE="false"
+                fi
+            fi
+
+            sync_api_key_from_config
+            if [[ -n "${CPA_API_KEY:-}" ]]; then
+                if response="$(curl -sS --max-time 5 -w $'\n%{http_code}' "${base_url}/v1/models" -H "Authorization: Bearer ${CPA_API_KEY}" 2>/dev/null)"; then
+                    model_code="${response##*$'\n'}"
+                    body="${response%$'\n'*}"
+                    if [[ "${model_code}" =~ ^[0-9]{3}$ ]]; then
+                        CAP_MODELS_HTTP_STATUS="${model_code}"
+                    fi
+                    if [[ "${model_code}" == "200" ]]; then
+                        CAP_MODEL_COUNT="$(printf '%s' "${body}" | count_models_in_response)"
+                    fi
+                fi
+            fi
+
+            if [[ "${CAP_HEALTH_HTTP_STATUS}" == "200" || "${CAP_MODELS_HTTP_STATUS}" == "200" ]]; then
+                CAP_API_HEALTHY="true"
+            elif [[ "${CAP_HEALTH_HTTP_STATUS}" != "unknown" || "${CAP_MODELS_HTTP_STATUS}" != "unknown" ]]; then
+                CAP_API_HEALTHY="false"
+            fi
+
+            probe_authenticated_management_api "${base_url}"
+        fi
+    fi
+
+    apply_audited_cpa_contract
+
+    if [[ "${CAP_CREDENTIAL_SOURCE}" != "management_api" ]]; then
+        probe_provider_credential_fallback
+    fi
+
+    if [[ "${CAP_MANAGEMENT_UI_ENABLED}" == "unknown" ]]; then
+        case "${CAP_REMOTE_PANEL_DISABLED}" in
+            true) CAP_MANAGEMENT_UI_ENABLED="false" ;;
+            false) CAP_MANAGEMENT_UI_ENABLED="true" ;;
+        esac
+    fi
+    CAP_MANAGEMENT_UI_REMOTE_ALLOWED="${CAP_REMOTE_ALLOW}"
+    CAP_PLUGIN_SYSTEM_CONFIGURED="${CAP_PLUGIN_CONFIGURED}"
+    CAP_PLUGIN_SYSTEM_ENABLED="${CAP_PLUGIN_ENABLED}"
+    derive_release_contract_capability
+
+    if [[ "${CAP_EXPOSURE_MODE}" == "local" || "${CAP_MANAGEMENT_UI_ENABLED}" == "false" ]]; then
+        CAP_MANAGEMENT_UI_PUBLIC_WARNING="none"
+    elif [[ "${CAP_EXPOSURE_MODE}" == "direct-public" && "${CAP_MANAGEMENT_UI_ENABLED}" == "true" && "${CAP_REMOTE_ALLOW}" == "true" ]]; then
+        CAP_MANAGEMENT_UI_PUBLIC_WARNING="critical"
+    elif [[ "${CAP_EXPOSURE_MODE}" == "direct-public" || "${CAP_EXPOSURE_MODE}" == "public-proxy" ]]; then
+        CAP_MANAGEMENT_UI_PUBLIC_WARNING="warning"
+    fi
+
+    if [[ "${CAP_PLUGIN_RESOURCE_MANAGEMENT_AUTHENTICATED}" == "false" && "${CAP_PLUGIN_SYSTEM_SUPPORTED}" == "true" ]]; then
+        if [[ "${CAP_EXPOSURE_MODE}" == "direct-public" && "${CAP_REMOTE_ALLOW}" == "true" ]]; then
+            CAP_CRITICAL_PUBLIC_PLUGIN_RESOURCE_EXPOSURE="true"
+        else
+            CAP_CRITICAL_PUBLIC_PLUGIN_RESOURCE_EXPOSURE="false"
+        fi
+    fi
+
+    if [[ "${CAP_DOCKER_CLI}" != "true" ]]; then
+        capability_add_finding "DOCKER_CLI_UNAVAILABLE" "failure" "Docker CLI is unavailable."
+    elif [[ "${CAP_DOCKER_DAEMON}" != "true" ]]; then
+        capability_add_finding "DOCKER_DAEMON_UNAVAILABLE" "failure" "Docker daemon is unavailable."
+    fi
+    if [[ "${CAP_COMPOSE_AVAILABLE}" != "true" ]]; then
+        capability_add_finding "COMPOSE_UNAVAILABLE" "failure" "Docker Compose is unavailable."
+    elif [[ "${CAP_COMPOSE_VALID}" == "false" ]]; then
+        capability_add_finding "COMPOSE_CONFIG_INVALID" "failure" "docker-compose.yml did not pass validation."
+    fi
+    case "${CAP_CONFIG_STATE}" in
+        directory) capability_add_finding "CONFIG_IS_DIRECTORY" "failure" "config.yaml is a directory, not a file." ;;
+        missing) capability_add_finding "CONFIG_MISSING" "failure" "config.yaml is missing." ;;
+    esac
+    if [[ "${CAP_CONFIG_STATE}" == "file" && "${CAP_CONFIG_API_KEY_COUNT}" == "0" ]]; then
+        capability_add_finding "API_KEYS_MISSING" "failure" "No API keys were found in config.yaml."
+    fi
+    if [[ "${CAP_CONTAINER_RUNNING}" == "false" ]]; then
+        capability_add_finding "CONTAINER_NOT_RUNNING" "warning" "The CPA container is not running."
+    elif [[ "${CAP_CONTAINER_RUNNING}" == "true" && "${CAP_ACTUAL_BIND_ADDRESS}" == "unknown" ]]; then
+        capability_add_finding "PORT_MAPPING_UNAVAILABLE" "warning" "The actual CPA port mapping could not be read."
+    fi
+    if [[ "${CAP_EXPOSURE_MODE}" == "direct-public" ]]; then
+        capability_add_finding "DIRECT_PUBLIC_EXPOSURE" "warning" "CPA is bound directly to a public interface (${classification_address}:${probe_port})."
+        capability_add_finding "PUBLIC_PROTECTION_UNVERIFIED" "warning" "TLS, firewall/source limits, and rate limits cannot be verified by this local probe."
+        if [[ "${CAP_REMOTE_ALLOW}" == "true" ]]; then
+            capability_add_finding "REMOTE_MANAGEMENT_PUBLIC" "warning" "Remote management is allowed while CPA is directly public."
+            if [[ "${CAP_REMOTE_PANEL_DISABLED}" == "false" ]]; then
+                capability_add_finding "PUBLIC_CONTROL_PANEL_ENABLED" "warning" "The management control panel is enabled on the direct-public CPA endpoint."
+            fi
+            if [[ "${CAP_REMOTE_SECRET_CONFIGURED}" == "false" ]]; then
+                capability_add_finding "REMOTE_MANAGEMENT_SECRET_MISSING" "failure" "Remote management is public but no management secret is configured."
+            fi
+        fi
+    elif [[ "${CAP_EXPOSURE_MODE}" == "public-proxy" ]]; then
+        capability_add_finding "PUBLIC_PROXY_PROTECTION_UNVERIFIED" "warning" "External HTTPS and proxy access controls cannot be verified by this local probe."
+    fi
+    if [[ "${CAP_MANAGEMENT_UI_ENABLED}" == "true" && "${CAP_MANAGEMENT_UI_REACHABLE}" == "false" ]]; then
+        capability_add_finding "MANAGEMENT_UI_UNREACHABLE" "warning" "The management UI is enabled but its local page did not return HTTP 200."
+    fi
+    if [[ "${CAP_CRITICAL_PUBLIC_PLUGIN_RESOURCE_EXPOSURE}" == "true" ]]; then
+        capability_add_finding "PUBLIC_PLUGIN_RESOURCES_UNAUTHENTICATED" "critical" "CPA plugin resource pages are not protected by management authentication while remote management is exposed over direct-public HTTP."
+    fi
+    if [[ "${CAP_PLUGIN_SYSTEM_SUPPORTED}" == "true" && "${CAP_PLUGIN_INSPECTION}" != "available" ]]; then
+        capability_add_finding "PLUGIN_INSPECTION_UNAVAILABLE" "warning" "Plugin support is available, but installed plugins could not be inspected through the authenticated Management API."
+    fi
+    if [[ "${exposure_hint}" == "public-proxy" && "${CAP_EXPOSURE_MODE}" == "direct-public" ]]; then
+        capability_add_finding "EXPOSURE_HINT_MISMATCH" "warning" "CPA_EXPOSURE_MODE says public-proxy, but the actual binding is public."
+    fi
+    if [[ "${CAP_CONTAINER_RUNNING}" == "true" ]]; then
+        if [[ "${CAP_API_HEALTHY}" == "false" ]]; then
+            capability_add_finding "API_UNHEALTHY" "failure" "The local CPA health check failed."
+        elif [[ "${CAP_API_HEALTHY}" == "unknown" ]]; then
+            capability_add_finding "API_HEALTH_UNKNOWN" "warning" "The local CPA health check could not be completed."
+        fi
+        if [[ "${CAP_MODELS_HTTP_STATUS}" == "401" ]]; then
+            capability_add_finding "MODELS_AUTH_FAILED" "failure" "/v1/models rejected the configured API key."
+        elif [[ "${CAP_MODELS_HTTP_STATUS}" == "unknown" ]]; then
+            capability_add_finding "MODELS_CHECK_UNKNOWN" "warning" "/v1/models could not be checked."
+        elif [[ "${CAP_MODELS_HTTP_STATUS}" == "200" && "${CAP_MODEL_COUNT}" == "0" ]]; then
+            capability_add_finding "MODELS_EMPTY" "warning" "/v1/models is healthy but returned no models."
+        fi
+    fi
+    if [[ "${CAP_CREDENTIAL_INSPECTION}" == "unknown" ]]; then
+        capability_add_finding "CREDENTIAL_INSPECTION_UNKNOWN" "warning" "Provider credential counts could not be inspected read-only."
+    elif [[ "${CAP_CREDENTIAL_TOTAL}" == "0" ]]; then
+        capability_add_finding "NO_PROVIDER_CREDENTIALS" "warning" "No provider credentials were found."
+    fi
+    if [[ "${CAP_LATEST_BACKUP_TIME}" == "unknown" ]]; then
+        capability_add_finding "NO_CPA_BACKUP" "warning" "No CPA backup archive was found."
+    fi
+    if [[ "${CAP_PREVIOUS_IMAGE_AVAILABLE}" == "false" ]]; then
+        capability_add_finding "NO_PREVIOUS_IMAGE" "warning" "No previous-image recovery target is available."
+    fi
+}
+
+render_cpa_capabilities_human() {
+    echo ""
+    echo "  CLI Proxy Manager capabilities (schema v${CAP_SCHEMA_VERSION})"
+    echo ""
+    printf '  Manager version:          %s\n' "${CAP_MANAGER_VERSION}"
+    printf '  CPA container running:    %s\n' "$(capability_display_bool "${CAP_CONTAINER_RUNNING}")"
+    printf '  Configured binding:       %s:%s\n' "$(capability_display_value "${CAP_CONFIGURED_BIND_ADDRESS}")" "$(capability_display_value "${CAP_CONFIGURED_BIND_PORT}")"
+    if [[ "${CAP_ACTUAL_BIND_ADDRESS}" == "unknown" ]]; then
+        printf '  Actual binding:           unavailable\n'
+    else
+        printf '  Actual binding:           %s:%s\n' "${CAP_ACTUAL_BIND_ADDRESS}" "$(capability_display_value "${CAP_ACTUAL_BIND_PORT}")"
+    fi
+    printf '  Exposure mode:            %s\n' "$(capability_display_value "${CAP_EXPOSURE_MODE}")"
+    printf '  Image reference:          %s\n' "$(capability_display_value "${CAP_IMAGE_REFERENCE}")"
+    printf '  Local image ID:           %s\n' "$(capability_display_value "${CAP_IMAGE_LOCAL_ID}")"
+    printf '  Repository digest:        %s\n' "$(capability_display_value "${CAP_IMAGE_REPOSITORY_DIGEST}")"
+    printf '  CPA version:              %s\n' "$(capability_display_value "${CAP_CPA_VERSION}")"
+    printf '  CPA commit:               %s\n' "$(capability_display_value "${CAP_CPA_COMMIT}")"
+    printf '  Release contract:         CPA %s@%s, Management Center %s@%s\n' \
+        "${RELEASE_CONTRACT_CPA_VERSION}" "${RELEASE_CONTRACT_CPA_COMMIT}" \
+        "${RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION}" "${RELEASE_CONTRACT_MANAGEMENT_CENTER_COMMIT}"
+    printf '  Contract compatibility:   source=exact_release_tags, target_pair=yes, runtime=%s\n' \
+        "$(capability_display_value "${CAP_RELEASE_COMPATIBILITY_STATUS}")"
+    printf '  API healthy:              %s (healthz=%s, models=%s)\n' \
+        "$(capability_display_bool "${CAP_API_HEALTHY}")" \
+        "$(capability_display_value "${CAP_HEALTH_HTTP_STATUS}")" \
+        "$(capability_display_value "${CAP_MODELS_HTTP_STATUS}")"
+    printf '  Model count:              %s\n' "$(capability_display_value "${CAP_MODEL_COUNT}")"
+    printf '  Remote management:        configured=%s, allow_remote=%s, panel_disabled=%s, secret_configured=%s\n' \
+        "$(capability_display_bool "${CAP_REMOTE_CONFIGURED}")" \
+        "$(capability_display_bool "${CAP_REMOTE_ALLOW}")" \
+        "$(capability_display_bool "${CAP_REMOTE_PANEL_DISABLED}")" \
+        "$(capability_display_bool "${CAP_REMOTE_SECRET_CONFIGURED}")"
+    printf '  Management UI:            enabled=%s, reachable=%s, http=%s\n' \
+        "$(capability_display_bool "${CAP_MANAGEMENT_UI_ENABLED}")" \
+        "$(capability_display_bool "${CAP_MANAGEMENT_UI_REACHABLE}")" \
+        "$(capability_display_value "${CAP_MANAGEMENT_UI_HTTP_STATUS}")"
+    printf '  Management Center:        version=%s, source=%s\n' \
+        "$(capability_display_value "${CAP_MANAGEMENT_UI_VERSION}")" \
+        "$(capability_display_value "${CAP_MANAGEMENT_UI_VERSION_SOURCE}")"
+    printf '  Management local URL:     %s\n' "$(capability_display_value "${CAP_MANAGEMENT_UI_LOCAL_URL}")"
+    printf '  Management protection:    remote_allowed=%s, external_https=%s, public_warning=%s\n' \
+        "$(capability_display_bool "${CAP_MANAGEMENT_UI_REMOTE_ALLOWED}")" \
+        "$(capability_display_bool "${CAP_MANAGEMENT_UI_EXTERNAL_HTTPS}")" \
+        "$(capability_display_value "${CAP_MANAGEMENT_UI_PUBLIC_WARNING}")"
+    printf '  Official capabilities:    management_api=%s, auth_files=%s, account_status=%s\n' \
+        "$(capability_display_bool "${CAP_MANAGEMENT_API_AVAILABLE}")" \
+        "$(capability_display_bool "${CAP_AUTH_FILES_INVENTORY_SUPPORT}")" \
+        "$(capability_display_bool "${CAP_ACCOUNT_STATUS_SUPPORT}")"
+    printf '  Priority and routing:     priority_read=%s, priority_write=%s, quota_reset=%s, routing=%s\n' \
+        "$(capability_display_bool "${CAP_PRIORITY_READ_SUPPORT}")" \
+        "$(capability_display_bool "${CAP_PRIORITY_WRITE_SUPPORT}")" \
+        "$(capability_display_bool "${CAP_QUOTA_RESET_SUPPORT}")" \
+        "$(capability_display_bool "${CAP_ROUTING_STRATEGY_SUPPORT}")"
+    printf '  Routing contract:         strategy=%s, wrr_supported=%s, wrr_configured=%s\n' \
+        "$(capability_display_value "${CAP_ROUTING_STRATEGY}")" \
+        "$(capability_display_bool "${CAP_WEIGHTED_ROUND_ROBIN_SUPPORTED}")" \
+        "$(capability_display_bool "${CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED}")"
+    printf '  Credential routing:       priority_supported=%s, priority_configured=%s, weights_configured=%s\n' \
+        "$(capability_display_bool "${CAP_PRIORITY_SUPPORTED}")" \
+        "$(capability_display_bool "${CAP_PRIORITY_CONFIGURED}")" \
+        "$(capability_display_bool "${CAP_CREDENTIAL_WEIGHTS_CONFIGURED}")"
+    printf '  Session affinity:         supported=%s, enabled=%s, ttl=%s\n' \
+        "$(capability_display_bool "${CAP_SESSION_AFFINITY_SUPPORTED}")" \
+        "$(capability_display_bool "${CAP_SESSION_AFFINITY_ENABLED}")" \
+        "$(capability_display_value "${CAP_SESSION_AFFINITY_TTL}")"
+    printf '  Failover / WRR test:      automatic_failover=%s, traffic_validation=%s\n' \
+        "$(capability_display_bool "${CAP_AUTOMATIC_FAILOVER_SUPPORTED}")" \
+        "${CAP_WRR_TRAFFIC_VALIDATION}"
+    printf '  Plugin system:            supported=%s, configured=%s, enabled=%s, inspection=%s\n' \
+        "$(capability_display_bool "${CAP_PLUGIN_SYSTEM_SUPPORTED}")" \
+        "$(capability_display_bool "${CAP_PLUGIN_SYSTEM_CONFIGURED}")" \
+        "$(capability_display_bool "${CAP_PLUGIN_SYSTEM_ENABLED}")" \
+        "${CAP_PLUGIN_INSPECTION}"
+    if [[ "${CAP_PLUGIN_INSPECTION}" == "available" ]]; then
+        local plugin_index
+        printf '  Installed plugins:        %s\n' "${CAP_PLUGIN_COUNT}"
+        for ((plugin_index = 0; plugin_index < ${#CAP_PLUGIN_IDS[@]}; plugin_index++)); do
+            printf '    - %s | %s | version=%s | enabled=%s | menus=%s\n' \
+                "${CAP_PLUGIN_IDS[$plugin_index]}" "${CAP_PLUGIN_NAMES[$plugin_index]}" \
+                "$(capability_display_value "${CAP_PLUGIN_VERSIONS[$plugin_index]}")" \
+                "$(capability_display_bool "${CAP_PLUGIN_STATES[$plugin_index]}")" \
+                "${CAP_PLUGIN_MENU_COUNTS[$plugin_index]}"
+        done
+    else
+        printf '  Plugin inspection reason: %s\n' "$(capability_display_value "${CAP_PLUGIN_INSPECTION_REASON}")"
+    fi
+    printf '  Plugin resource auth:     management_authenticated=%s, verification=%s\n' \
+        "$(capability_display_bool "${CAP_PLUGIN_RESOURCE_MANAGEMENT_AUTHENTICATED}")" \
+        "$(capability_display_value "${CAP_PLUGIN_RESOURCE_VERIFICATION}")"
+    if [[ "${CAP_CREDENTIAL_INSPECTION}" == "available" ]]; then
+        printf '  Provider credentials:     source=%s, antigravity=%s, claude=%s, codex=%s, gemini=%s, kimi=%s, xai=%s, unknown=%s, total=%s\n' \
+            "${CAP_CREDENTIAL_SOURCE}" "${CAP_CREDENTIAL_ANTIGRAVITY}" "${CAP_CREDENTIAL_CLAUDE}" "${CAP_CREDENTIAL_CODEX}" \
+            "${CAP_CREDENTIAL_GEMINI}" "${CAP_CREDENTIAL_KIMI}" "${CAP_CREDENTIAL_XAI}" "${CAP_CREDENTIAL_UNKNOWN}" "${CAP_CREDENTIAL_TOTAL}"
+        local provider_index
+        for ((provider_index = 0; provider_index < ${#CAP_ADDITIONAL_PROVIDER_TYPES[@]}; provider_index++)); do
+            printf '    - future provider %s=%s\n' "${CAP_ADDITIONAL_PROVIDER_TYPES[$provider_index]}" "${CAP_ADDITIONAL_PROVIDER_COUNTS[$provider_index]}"
+        done
+    else
+        printf '  Provider credentials:     unavailable\n'
+    fi
+    printf '  Latest CPA backup time:   %s\n' "$(capability_display_value "${CAP_LATEST_BACKUP_TIME}")"
+    printf '  Previous image available: %s\n' "$(capability_display_bool "${CAP_PREVIOUS_IMAGE_AVAILABLE}")"
+
+    if [[ ${#CAP_FINDING_CODES[@]} -gt 0 ]]; then
+        echo ""
+        echo "  Findings:"
+        local i
+        for ((i = 0; i < ${#CAP_FINDING_CODES[@]}; i++)); do
+            printf '  - [%s] %s: %s\n' "${CAP_FINDING_SEVERITIES[$i]}" "${CAP_FINDING_CODES[$i]}" "${CAP_FINDING_MESSAGES[$i]}"
+        done
+    fi
+    echo ""
+}
+
+render_cpa_capabilities_json() {
+    local i
+    printf '{\n'
+    printf '  "schema_version": %s,\n' "${CAP_SCHEMA_VERSION}"
+    printf '  "generated_at": '; capability_json_string_or_null "${CAP_GENERATED_AT}"; printf ',\n'
+    printf '  "manager": {"version": '; capability_json_string_or_null "${CAP_MANAGER_VERSION}"; printf '},\n'
+    printf '  "container": {"name": '; capability_json_string_or_null "${CONTAINER_NAME}"; printf ', "running": '; capability_json_bool_or_null "${CAP_CONTAINER_RUNNING}"; printf '},\n'
+    printf '  "network": {\n'
+    printf '    "configured_address": '; capability_json_string_or_null "${CAP_CONFIGURED_BIND_ADDRESS}"; printf ',\n'
+    printf '    "configured_port": '; capability_json_number_or_null "${CAP_CONFIGURED_BIND_PORT}"; printf ',\n'
+    printf '    "actual_address": '; capability_json_string_or_null "${CAP_ACTUAL_BIND_ADDRESS}"; printf ',\n'
+    printf '    "actual_port": '; capability_json_number_or_null "${CAP_ACTUAL_BIND_PORT}"; printf ',\n'
+    printf '    "exposure_mode": '; capability_json_string_or_null "${CAP_EXPOSURE_MODE}"; printf '\n'
+    printf '  },\n'
+    printf '  "image": {\n'
+    printf '    "reference": '; capability_json_string_or_null "${CAP_IMAGE_REFERENCE}"; printf ',\n'
+    printf '    "local_id": '; capability_json_string_or_null "${CAP_IMAGE_LOCAL_ID}"; printf ',\n'
+    printf '    "repository_digest": '; capability_json_string_or_null "${CAP_IMAGE_REPOSITORY_DIGEST}"; printf '\n'
+    printf '  },\n'
+    printf '  "cpa": {"version": '; capability_json_string_or_null "${CAP_CPA_VERSION}"; printf ', "commit": '; capability_json_string_or_null "${CAP_CPA_COMMIT}"; printf '},\n'
+    printf '  "release_contract": {\n'
+    printf '    "cpa_version": '; capability_json_string_or_null "${RELEASE_CONTRACT_CPA_VERSION}"; printf ',\n'
+    printf '    "cpa_commit": '; capability_json_string_or_null "${RELEASE_CONTRACT_CPA_COMMIT}"; printf ',\n'
+    printf '    "management_center_version": '; capability_json_string_or_null "${RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION}"; printf ',\n'
+    printf '    "management_center_commit": '; capability_json_string_or_null "${RELEASE_CONTRACT_MANAGEMENT_CENTER_COMMIT}"; printf ',\n'
+    printf '    "source": "exact_release_tags",\n'
+    printf '    "target_pair_compatible": true,\n'
+    printf '    "compatibility_status": '; capability_json_string_or_null "${CAP_RELEASE_COMPATIBILITY_STATUS}"; printf '\n'
+    printf '  },\n'
+    printf '  "api": {\n'
+    printf '    "healthy": '; capability_json_bool_or_null "${CAP_API_HEALTHY}"; printf ',\n'
+    printf '    "health_http_status": '; capability_json_number_or_null "${CAP_HEALTH_HTTP_STATUS}"; printf ',\n'
+    printf '    "models_http_status": '; capability_json_number_or_null "${CAP_MODELS_HTTP_STATUS}"; printf ',\n'
+    printf '    "model_count": '; capability_json_number_or_null "${CAP_MODEL_COUNT}"; printf '\n'
+    printf '  },\n'
+    printf '  "remote_management": {\n'
+    printf '    "configured": '; capability_json_bool_or_null "${CAP_REMOTE_CONFIGURED}"; printf ',\n'
+    printf '    "allow_remote": '; capability_json_bool_or_null "${CAP_REMOTE_ALLOW}"; printf ',\n'
+    printf '    "control_panel_disabled": '; capability_json_bool_or_null "${CAP_REMOTE_PANEL_DISABLED}"; printf ',\n'
+    printf '    "secret_configured": '; capability_json_bool_or_null "${CAP_REMOTE_SECRET_CONFIGURED}"; printf '\n'
+    printf '  },\n'
+    printf '  "management_ui": {\n'
+    printf '    "enabled": '; capability_json_bool_or_null "${CAP_MANAGEMENT_UI_ENABLED}"; printf ',\n'
+    printf '    "reachable": '; capability_json_bool_or_null "${CAP_MANAGEMENT_UI_REACHABLE}"; printf ',\n'
+    printf '    "http_status": '; capability_json_number_or_null "${CAP_MANAGEMENT_UI_HTTP_STATUS}"; printf ',\n'
+    printf '    "local_url": '; capability_json_string_or_null "${CAP_MANAGEMENT_UI_LOCAL_URL}"; printf ',\n'
+    printf '    "version": '; capability_json_string_or_null "${CAP_MANAGEMENT_UI_VERSION}"; printf ',\n'
+    printf '    "version_source": '; capability_json_string_or_null "${CAP_MANAGEMENT_UI_VERSION_SOURCE}"; printf ',\n'
+    printf '    "remote_access_allowed": '; capability_json_bool_or_null "${CAP_MANAGEMENT_UI_REMOTE_ALLOWED}"; printf ',\n'
+    printf '    "external_https_protection": '; capability_json_bool_or_null "${CAP_MANAGEMENT_UI_EXTERNAL_HTTPS}"; printf ',\n'
+    printf '    "public_access_warning": '; capability_json_string_or_null "${CAP_MANAGEMENT_UI_PUBLIC_WARNING}"; printf '\n'
+    printf '  },\n'
+    printf '  "official_capabilities": {\n'
+    printf '    "contract_source": '; capability_json_string_or_null "${CAP_OFFICIAL_CONTRACT_SOURCE}"; printf ',\n'
+    printf '    "management_api_available": '; capability_json_bool_or_null "${CAP_MANAGEMENT_API_AVAILABLE}"; printf ',\n'
+    printf '    "auth_files_inventory_supported": '; capability_json_bool_or_null "${CAP_AUTH_FILES_INVENTORY_SUPPORT}"; printf ',\n'
+    printf '    "account_status_supported": '; capability_json_bool_or_null "${CAP_ACCOUNT_STATUS_SUPPORT}"; printf ',\n'
+    printf '    "priority_read_supported": '; capability_json_bool_or_null "${CAP_PRIORITY_READ_SUPPORT}"; printf ',\n'
+    printf '    "priority_write_supported": '; capability_json_bool_or_null "${CAP_PRIORITY_WRITE_SUPPORT}"; printf ',\n'
+    printf '    "quota_reset_supported": '; capability_json_bool_or_null "${CAP_QUOTA_RESET_SUPPORT}"; printf ',\n'
+    printf '    "routing_strategy_supported": '; capability_json_bool_or_null "${CAP_ROUTING_STRATEGY_SUPPORT}"; printf ',\n'
+    printf '    "plugin_system_supported": '; capability_json_bool_or_null "${CAP_PLUGIN_SYSTEM_SUPPORTED}"; printf ',\n'
+    printf '    "plugin_system_configured": '; capability_json_bool_or_null "${CAP_PLUGIN_SYSTEM_CONFIGURED}"; printf ',\n'
+    printf '    "plugin_system_enabled": '; capability_json_bool_or_null "${CAP_PLUGIN_SYSTEM_ENABLED}"; printf '\n'
+    printf '  },\n'
+    printf '  "routing": {\n'
+    printf '    "strategy": '; capability_json_string_or_null "${CAP_ROUTING_STRATEGY}"; printf ',\n'
+    printf '    "weighted_round_robin_supported": '; capability_json_bool_or_null "${CAP_WEIGHTED_ROUND_ROBIN_SUPPORTED}"; printf ',\n'
+    printf '    "weighted_round_robin_configured": '; capability_json_bool_or_null "${CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED}"; printf ',\n'
+    printf '    "priority_supported": '; capability_json_bool_or_null "${CAP_PRIORITY_SUPPORTED}"; printf ',\n'
+    printf '    "priority_configured": '; capability_json_bool_or_null "${CAP_PRIORITY_CONFIGURED}"; printf ',\n'
+    printf '    "credential_weights_configured": '; capability_json_bool_or_null "${CAP_CREDENTIAL_WEIGHTS_CONFIGURED}"; printf ',\n'
+    printf '    "session_affinity_supported": '; capability_json_bool_or_null "${CAP_SESSION_AFFINITY_SUPPORTED}"; printf ',\n'
+    printf '    "session_affinity_enabled": '; capability_json_bool_or_null "${CAP_SESSION_AFFINITY_ENABLED}"; printf ',\n'
+    printf '    "session_affinity_ttl": '; capability_json_string_or_null "${CAP_SESSION_AFFINITY_TTL}"; printf ',\n'
+    printf '    "automatic_failover_supported": '; capability_json_bool_or_null "${CAP_AUTOMATIC_FAILOVER_SUPPORTED}"; printf ',\n'
+    printf '    "wrr_traffic_validation": '; capability_json_string_or_null "${CAP_WRR_TRAFFIC_VALIDATION}"; printf '\n'
+    printf '  },\n'
+    printf '  "plugins": {\n'
+    printf '    "inspection": '; capability_json_string_or_null "${CAP_PLUGIN_INSPECTION}"; printf ',\n'
+    printf '    "reason": '; capability_json_string_or_null "${CAP_PLUGIN_INSPECTION_REASON}"; printf ',\n'
+    printf '    "source": '; capability_json_string_or_null "${CAP_PLUGIN_SOURCE}"; printf ',\n'
+    printf '    "count": '; capability_json_number_or_null "${CAP_PLUGIN_COUNT}"; printf ',\n'
+    printf '    "items": ['
+    for ((i = 0; i < ${#CAP_PLUGIN_IDS[@]}; i++)); do
+        (( i > 0 )) && printf ','
+        printf '\n      {"id": '; capability_json_string_or_null "${CAP_PLUGIN_IDS[$i]}"
+        printf ', "name": '; capability_json_string_or_null "${CAP_PLUGIN_NAMES[$i]}"
+        printf ', "version": '; capability_json_string_or_null "${CAP_PLUGIN_VERSIONS[$i]}"
+        printf ', "enabled": '; capability_json_bool_or_null "${CAP_PLUGIN_STATES[$i]}"
+        printf ', "menu_count": '; capability_json_number_or_null "${CAP_PLUGIN_MENU_COUNTS[$i]}"; printf '}'
+    done
+    [[ ${#CAP_PLUGIN_IDS[@]} -gt 0 ]] && printf '\n    '
+    printf ']\n'
+    printf '  },\n'
+    printf '  "security": {\n'
+    printf '    "plugin_resource_pages_management_authenticated": '; capability_json_bool_or_null "${CAP_PLUGIN_RESOURCE_MANAGEMENT_AUTHENTICATED}"; printf ',\n'
+    printf '    "plugin_resource_pages_verification": '; capability_json_string_or_null "${CAP_PLUGIN_RESOURCE_VERIFICATION}"; printf ',\n'
+    printf '    "critical_public_plugin_resource_exposure": '; capability_json_bool_or_null "${CAP_CRITICAL_PUBLIC_PLUGIN_RESOURCE_EXPOSURE}"; printf '\n'
+    printf '  },\n'
+    printf '  "credentials": {\n'
+    printf '    "inspection": '; capability_json_string_or_null "${CAP_CREDENTIAL_INSPECTION}"; printf ',\n'
+    printf '    "source": '; capability_json_string_or_null "${CAP_CREDENTIAL_SOURCE}"; printf ',\n'
+    printf '    "providers": {\n'
+    printf '      "antigravity": '; capability_json_number_or_null "${CAP_CREDENTIAL_ANTIGRAVITY}"; printf ',\n'
+    printf '      "claude": '; capability_json_number_or_null "${CAP_CREDENTIAL_CLAUDE}"; printf ',\n'
+    printf '      "codex": '; capability_json_number_or_null "${CAP_CREDENTIAL_CODEX}"; printf ',\n'
+    printf '      "gemini": '; capability_json_number_or_null "${CAP_CREDENTIAL_GEMINI}"; printf ',\n'
+    printf '      "kimi": '; capability_json_number_or_null "${CAP_CREDENTIAL_KIMI}"; printf ',\n'
+    printf '      "xai": '; capability_json_number_or_null "${CAP_CREDENTIAL_XAI}"; printf ',\n'
+    printf '      "unknown": '; capability_json_number_or_null "${CAP_CREDENTIAL_UNKNOWN}"; printf '\n'
+    printf '    },\n'
+    printf '    "additional_providers": ['
+    for ((i = 0; i < ${#CAP_ADDITIONAL_PROVIDER_TYPES[@]}; i++)); do
+        (( i > 0 )) && printf ','
+        printf '\n      {"type": '; capability_json_string_or_null "${CAP_ADDITIONAL_PROVIDER_TYPES[$i]}"
+        printf ', "count": '; capability_json_number_or_null "${CAP_ADDITIONAL_PROVIDER_COUNTS[$i]}"; printf '}'
+    done
+    [[ ${#CAP_ADDITIONAL_PROVIDER_TYPES[@]} -gt 0 ]] && printf '\n    '
+    printf '],\n'
+    printf '    "total": '; capability_json_number_or_null "${CAP_CREDENTIAL_TOTAL}"; printf '\n'
+    printf '  },\n'
+    printf '  "recovery": {\n'
+    printf '    "latest_backup_time": '; capability_json_string_or_null "${CAP_LATEST_BACKUP_TIME}"; printf ',\n'
+    printf '    "previous_image_available": '; capability_json_bool_or_null "${CAP_PREVIOUS_IMAGE_AVAILABLE}"; printf '\n'
+    printf '  },\n'
+    printf '  "warnings": [\n'
+    for ((i = 0; i < ${#CAP_FINDING_CODES[@]}; i++)); do
+        printf '    {"code": '; capability_json_string_or_null "${CAP_FINDING_CODES[$i]}"
+        printf ', "severity": '; capability_json_string_or_null "${CAP_FINDING_SEVERITIES[$i]}"
+        printf ', "message": '; capability_json_string_or_null "${CAP_FINDING_MESSAGES[$i]}"
+        if (( i + 1 < ${#CAP_FINDING_CODES[@]} )); then printf '},\n'; else printf '}\n'; fi
+    done
+    printf '  ]\n'
+    printf '}\n'
+}
+
+cmd_capabilities() {
+    local format="${1:-}"
+    if [[ $# -gt 1 || ( -n "${format}" && "${format}" != "--json" ) ]]; then
+        error "用法: bash deploy.sh capabilities [--json]"
+        return 2
+    fi
+
+    probe_cpa_capabilities
+    if [[ "${format}" == "--json" ]]; then
+        render_cpa_capabilities_json
+    else
+        render_cpa_capabilities_human
+    fi
 }
 
 resolve_backup_path() {
@@ -504,7 +2025,7 @@ config_wizard() {
         ask "管理面板密码" "${default_mgmt_key}"
         read -r input_mgmt
         CPA_MANAGEMENT_KEY="${input_mgmt:-$default_mgmt_key}"
-        info "管理面板: ${GREEN}启用${NC}  密码: ${CYAN}${CPA_MANAGEMENT_KEY}${NC}"
+        info "管理面板: ${GREEN}启用${NC}"
     else
         CPA_MANAGEMENT_KEY=""
         info "管理面板: ${DIM}禁用${NC}"
@@ -802,7 +2323,7 @@ show_result() {
     fi
     if [[ -n "${CPA_MANAGEMENT_KEY}" ]]; then
         echo -e "  管理面板  ${GREEN}http://127.0.0.1:${CPA_PORT}/management.html${NC}"
-        echo -e "  面板密码  ${GREEN}${CPA_MANAGEMENT_KEY}${NC}"
+        echo -e "  面板密码  ${DIM}已设置（不回显）${NC}"
     fi
     echo ""
     divider
@@ -1076,158 +2597,100 @@ cmd_logs() {
 
 cmd_doctor() {
     banner
-    step "Doctor 自检"
+    step "Doctor v2 read-only check"
 
-    local failures=0
-    local warnings=0
-    local docker_ok=false
-    local compose_ok=false
-    local container_running=false
-    local mapped_port="${CPA_PORT}"
+    probe_cpa_capabilities
 
-    if command -v docker &>/dev/null; then
-        info "Docker CLI 已安装"
+    local failures=0 warnings=0 i
+
+    [[ "${CAP_DOCKER_CLI}" == "true" ]] && info "Docker CLI is available"
+    [[ "${CAP_DOCKER_DAEMON}" == "true" ]] && info "Docker daemon is available"
+    [[ "${CAP_COMPOSE_AVAILABLE}" == "true" ]] && info "Docker Compose is available (${COMPOSE_CMD})"
+    if [[ "${CAP_CONFIG_STATE}" == "file" ]]; then
+        info "config.yaml is a file; API key count: $(capability_display_value "${CAP_CONFIG_API_KEY_COUNT}")"
+    fi
+    [[ "${CAP_COMPOSE_VALID}" == "true" ]] && info "docker-compose.yml is valid"
+    [[ "${CAP_CONTAINER_RUNNING}" == "true" ]] && info "CPA container is running: ${CONTAINER_NAME}"
+
+    info "Configured binding: ${CAP_CONFIGURED_BIND_ADDRESS}:$(capability_display_value "${CAP_CONFIGURED_BIND_PORT}")"
+    if [[ "${CAP_ACTUAL_BIND_ADDRESS}" != "unknown" ]]; then
+        info "Actual binding: ${CAP_ACTUAL_BIND_ADDRESS}:$(capability_display_value "${CAP_ACTUAL_BIND_PORT}")"
+    fi
+    info "Exposure mode: $(capability_display_value "${CAP_EXPOSURE_MODE}")"
+
+    if [[ "${CAP_IMAGE_LOCAL_ID}" != "unknown" ]]; then
+        info "CPA image is available locally"
+        detail "Reference: ${CAP_IMAGE_REFERENCE}"
+        detail "Image ID: ${CAP_IMAGE_LOCAL_ID}"
+        detail "Repository digest: $(capability_display_value "${CAP_IMAGE_REPOSITORY_DIGEST}")"
+    fi
+    if [[ "${CAP_CPA_VERSION}" != "unknown" || "${CAP_CPA_COMMIT}" != "unknown" ]]; then
+        info "CPA build metadata is available"
+        detail "Version: $(capability_display_value "${CAP_CPA_VERSION}")"
+        detail "Commit: $(capability_display_value "${CAP_CPA_COMMIT}")"
     else
-        error "未检测到 Docker CLI"
-        failures=$((failures + 1))
+        info "CPA build metadata is unavailable from the local API"
+    fi
+    info "D2.2 release contract: CPA ${RELEASE_CONTRACT_CPA_VERSION}@${RELEASE_CONTRACT_CPA_COMMIT}, Management Center ${RELEASE_CONTRACT_MANAGEMENT_CENTER_VERSION}@${RELEASE_CONTRACT_MANAGEMENT_CENTER_COMMIT}"
+    detail "contract-source=exact_release_tags, target-pair-compatible=yes, runtime-compatibility=$(capability_display_value "${CAP_RELEASE_COMPATIBILITY_STATUS}")"
+
+    if [[ "${CAP_API_HEALTHY}" == "true" ]]; then
+        info "CPA API is healthy"
+    fi
+    if [[ "${CAP_MODELS_HTTP_STATUS}" == "200" ]]; then
+        info "/v1/models returned 200; model count: $(capability_display_value "${CAP_MODEL_COUNT}")"
     fi
 
-    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-        docker_ok=true
-        info "Docker 守护进程运行中"
+    info "Remote management: configured=$(capability_display_bool "${CAP_REMOTE_CONFIGURED}"), allow_remote=$(capability_display_bool "${CAP_REMOTE_ALLOW}"), panel_disabled=$(capability_display_bool "${CAP_REMOTE_PANEL_DISABLED}"), secret_configured=$(capability_display_bool "${CAP_REMOTE_SECRET_CONFIGURED}")"
+    info "Management UI: enabled=$(capability_display_bool "${CAP_MANAGEMENT_UI_ENABLED}"), reachable=$(capability_display_bool "${CAP_MANAGEMENT_UI_REACHABLE}"), HTTP=$(capability_display_value "${CAP_MANAGEMENT_UI_HTTP_STATUS}")"
+    detail "Management Center version=$(capability_display_value "${CAP_MANAGEMENT_UI_VERSION}"), source=$(capability_display_value "${CAP_MANAGEMENT_UI_VERSION_SOURCE}")"
+    detail "Safe local URL: $(capability_display_value "${CAP_MANAGEMENT_UI_LOCAL_URL}")"
+    detail "External HTTPS protection: $(capability_display_bool "${CAP_MANAGEMENT_UI_EXTERNAL_HTTPS}")"
+    info "Official Management API support: $(capability_display_bool "${CAP_MANAGEMENT_API_AVAILABLE}") (contract=$(capability_display_value "${CAP_OFFICIAL_CONTRACT_SOURCE}"))"
+    detail "auth-files=$(capability_display_bool "${CAP_AUTH_FILES_INVENTORY_SUPPORT}"), account-status=$(capability_display_bool "${CAP_ACCOUNT_STATUS_SUPPORT}"), priority-read=$(capability_display_bool "${CAP_PRIORITY_READ_SUPPORT}"), priority-write=$(capability_display_bool "${CAP_PRIORITY_WRITE_SUPPORT}")"
+    detail "quota-reset=$(capability_display_bool "${CAP_QUOTA_RESET_SUPPORT}"), routing-strategy=$(capability_display_bool "${CAP_ROUTING_STRATEGY_SUPPORT}")"
+    info "Routing: strategy=$(capability_display_value "${CAP_ROUTING_STRATEGY}"), weighted-supported=$(capability_display_bool "${CAP_WEIGHTED_ROUND_ROBIN_SUPPORTED}"), weighted-configured=$(capability_display_bool "${CAP_WEIGHTED_ROUND_ROBIN_CONFIGURED}")"
+    detail "priority-supported=$(capability_display_bool "${CAP_PRIORITY_SUPPORTED}"), priority-configured=$(capability_display_bool "${CAP_PRIORITY_CONFIGURED}"), credential-weights-configured=$(capability_display_bool "${CAP_CREDENTIAL_WEIGHTS_CONFIGURED}")"
+    detail "session-affinity-supported=$(capability_display_bool "${CAP_SESSION_AFFINITY_SUPPORTED}"), enabled=$(capability_display_bool "${CAP_SESSION_AFFINITY_ENABLED}"), ttl=$(capability_display_value "${CAP_SESSION_AFFINITY_TTL}"), automatic-failover=$(capability_display_bool "${CAP_AUTOMATIC_FAILOVER_SUPPORTED}"), WRR-traffic-validation=${CAP_WRR_TRAFFIC_VALIDATION}"
+    info "CPA plugin system: supported=$(capability_display_bool "${CAP_PLUGIN_SYSTEM_SUPPORTED}"), configured=$(capability_display_bool "${CAP_PLUGIN_SYSTEM_CONFIGURED}"), enabled=$(capability_display_bool "${CAP_PLUGIN_SYSTEM_ENABLED}")"
+    if [[ "${CAP_PLUGIN_INSPECTION}" == "available" ]]; then
+        detail "Installed plugin count: ${CAP_PLUGIN_COUNT}"
     else
-        error "Docker 守护进程不可用"
-        detail "请启动 Docker Desktop 后重试"
-        failures=$((failures + 1))
+        detail "Plugin inspection unavailable: $(capability_display_value "${CAP_PLUGIN_INSPECTION_REASON}")"
     fi
-
-    COMPOSE_CMD="$(detect_compose)"
-    if [[ -n "${COMPOSE_CMD}" ]]; then
-        compose_ok=true
-        info "Docker Compose 可用 (${COMPOSE_CMD})"
-    else
-        error "Docker Compose 不可用"
-        failures=$((failures + 1))
+    detail "Plugin resource pages use management authentication: $(capability_display_bool "${CAP_PLUGIN_RESOURCE_MANAGEMENT_AUTHENTICATED}")"
+    if [[ "${CAP_CREDENTIAL_INSPECTION}" == "available" ]]; then
+        info "Provider credential counts are available"
+        detail "source=${CAP_CREDENTIAL_SOURCE}, antigravity=${CAP_CREDENTIAL_ANTIGRAVITY}, claude=${CAP_CREDENTIAL_CLAUDE}, codex=${CAP_CREDENTIAL_CODEX}, gemini=${CAP_CREDENTIAL_GEMINI}, kimi=${CAP_CREDENTIAL_KIMI}, xai=${CAP_CREDENTIAL_XAI}, unknown=${CAP_CREDENTIAL_UNKNOWN}, total=${CAP_CREDENTIAL_TOTAL}"
     fi
-
-    if [[ -d "${CONFIG_FILE}" ]]; then
-        error "config.yaml 当前是目录，不是文件"
-        detail "请删除空目录后重新运行部署"
-        failures=$((failures + 1))
-    elif [[ -f "${CONFIG_FILE}" ]]; then
-        local key_count
-        key_count="$(config_api_key_count)"
-        if [[ "${key_count:-0}" -gt 0 ]]; then
-            info "config.yaml 存在，API key 数量: ${key_count}"
-        else
-            warn "config.yaml 存在，但未读取到 api-keys"
-            warnings=$((warnings + 1))
-        fi
-    else
-        error "config.yaml 不存在"
-        detail "请先运行: bash deploy.sh"
-        failures=$((failures + 1))
+    if [[ "${CAP_LATEST_BACKUP_TIME}" != "unknown" ]]; then
+        info "Latest CPA backup: ${CAP_LATEST_BACKUP_TIME}"
     fi
+    [[ "${CAP_PREVIOUS_IMAGE_AVAILABLE}" == "true" ]] && info "Previous-image recovery target is available"
 
-    if $compose_ok && [[ -f "${CONFIG_FILE}" ]]; then
-        if (cd "${SCRIPT_DIR}" && CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" config --quiet); then
-            info "docker-compose.yml 配置有效"
-        else
-            error "docker-compose.yml 配置检查失败"
-            failures=$((failures + 1))
-        fi
-    fi
-
-    if $docker_ok; then
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
-            container_running=true
-            info "容器正在运行: ${CONTAINER_NAME}"
-            local port_output
-            port_output="$(docker port "${CONTAINER_NAME}" 8317/tcp 2>/dev/null | head -1 || true)"
-            if [[ -n "${port_output}" ]]; then
-                mapped_port="${port_output##*:}"
-                info "端口映射正常: 127.0.0.1:${mapped_port}"
-            else
-                warn "未读取到容器端口映射，使用配置端口 ${CPA_PORT} 测试"
-                warnings=$((warnings + 1))
-            fi
-        else
-            warn "容器未运行"
-            detail "可运行: bash deploy.sh start"
-            warnings=$((warnings + 1))
-
-            if command -v lsof &>/dev/null && lsof -i :"${CPA_PORT}" &>/dev/null 2>&1; then
-                warn "端口 ${CPA_PORT} 已被占用"
-                warnings=$((warnings + 1))
-            else
-                info "端口 ${CPA_PORT} 当前未被占用"
-            fi
-        fi
-
-        if docker volume inspect "${AUTH_VOLUME}" &>/dev/null 2>&1; then
-            local cred_count
-            cred_count="$(docker run --rm -v "${AUTH_VOLUME}:/auth:ro" alpine sh -c "find /auth -maxdepth 1 -type f 2>/dev/null | grep -Ev '/(config|logs)$' | wc -l" 2>/dev/null | tr -d '[:space:]' || echo "0")"
-            if [[ "${cred_count:-0}" -gt 0 ]]; then
-                info "OAuth 凭证卷存在，凭证文件数: ${cred_count}"
-            else
-                warn "OAuth 凭证卷存在，但未找到 Provider 凭证"
-                detail "可运行: bash deploy.sh login"
-                warnings=$((warnings + 1))
-            fi
-        else
-            warn "OAuth 凭证卷不存在"
-            detail "完成 login 后会自动创建"
-            warnings=$((warnings + 1))
-        fi
-    fi
-
-    if $container_running; then
-        sync_api_key_from_config
-        if [[ -z "${CPA_API_KEY}" ]]; then
-            error "无法读取 API key，跳过 /v1/models 测试"
-            failures=$((failures + 1))
-        else
-            local body_file http_code curl_exit
-            body_file="$(mktemp)"
-            set +e
-            http_code=$(curl -sS -o "${body_file}" -w "%{http_code}" \
-                "http://127.0.0.1:${mapped_port}/v1/models" \
-                -H "Authorization: Bearer ${CPA_API_KEY}" 2>/dev/null)
-            curl_exit=$?
-            set -e
-            if [[ ${curl_exit} -ne 0 ]]; then
-                http_code="000"
-            fi
-
-            if [[ "${http_code}" == "200" ]]; then
-                if grep -q '"id"[[:space:]]*:' "${body_file}"; then
-                    info "/v1/models 返回 200，且模型列表非空"
-                else
-                    warn "/v1/models 返回 200，但模型列表可能为空"
-                    detail "通常表示 OAuth 登录未完成或凭证未加载"
-                    warnings=$((warnings + 1))
-                fi
-            elif [[ "${http_code}" == "401" ]]; then
-                error "/v1/models 认证失败 (401)"
-                detail "请检查 config.yaml 中的 API key"
+    for ((i = 0; i < ${#CAP_FINDING_CODES[@]}; i++)); do
+        case "${CAP_FINDING_SEVERITIES[$i]}" in
+            failure)
+                error "${CAP_FINDING_CODES[$i]}: ${CAP_FINDING_MESSAGES[$i]}"
                 failures=$((failures + 1))
-            elif [[ "${http_code}" == "000" ]]; then
-                warn "/v1/models 无响应"
+                ;;
+            critical)
+                warn "CRITICAL ${CAP_FINDING_CODES[$i]}: ${CAP_FINDING_MESSAGES[$i]}"
                 warnings=$((warnings + 1))
-            else
-                warn "/v1/models 返回异常状态: ${http_code}"
+                ;;
+            *)
+                warn "${CAP_FINDING_CODES[$i]}: ${CAP_FINDING_MESSAGES[$i]}"
                 warnings=$((warnings + 1))
-            fi
-            rm -f "${body_file}"
-        fi
-    fi
+                ;;
+        esac
+    done
 
     echo ""
     divider
-    if [[ "${failures}" -eq 0 ]]; then
-        info "Doctor 完成: ${warnings} 个警告，0 个错误"
+    if [[ ${failures} -eq 0 ]]; then
+        info "Doctor v2 completed: ${warnings} warning(s), 0 failure(s)"
     else
-        error "Doctor 完成: ${warnings} 个警告，${failures} 个错误"
+        error "Doctor v2 completed: ${warnings} warning(s), ${failures} failure(s)"
         return 1
     fi
 }
@@ -1658,8 +3121,16 @@ cmd_uninstall() {
     fi
 
     cd "${SCRIPT_DIR}"
-    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
-    docker volume rm "${AUTH_VOLUME}" 2>/dev/null || true
+    # 先仅删除容器/网络；数据卷必须经过后续独立确认。
+    CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" down 2>/dev/null || { error "停止现有栈失败"; return 1; }
+    if confirm "是否删除 OAuth 凭证卷 (${AUTH_VOLUME})？" "n"; then
+        if docker volume inspect "${AUTH_VOLUME}" >/dev/null 2>&1; then
+            docker volume rm "${AUTH_VOLUME}" >/dev/null || { error "OAuth 凭证卷删除失败"; return 1; }
+            docker volume inspect "${AUTH_VOLUME}" >/dev/null 2>&1 && { error "OAuth 凭证卷仍然存在"; return 1; }
+        fi
+    else
+        warn "OAuth 凭证卷已保留；这不是无残留卸载"
+    fi
 
     if confirm "是否删除配置文件 (config.yaml)？" "n"; then
         if [[ -d "${CONFIG_FILE}" ]]; then
@@ -1749,6 +3220,500 @@ console.log(JSON.stringify(s,null,2));
     echo ""
 }
 
+# ========================== Sub2API companion stack ===========================
+
+require_sub2api_compose() {
+    if ! command -v docker &>/dev/null; then
+        error "未检测到 Docker"
+        return 1
+    fi
+    if ! docker info &>/dev/null 2>&1; then
+        error "Docker 守护进程未运行"
+        return 1
+    fi
+    if ! docker compose version &>/dev/null 2>&1; then
+        error "Sub2API 功能要求 Docker Compose v2"
+        return 1
+    fi
+    assert_regular_file "${SUB2API_COMPOSE_FILE}" || return 1
+}
+
+sub2api_compose() {
+    local postgres_mode redis_mode
+    postgres_mode="$(sub2api_env_value SUB2API_POSTGRES_MODE)"
+    redis_mode="$(sub2api_env_value SUB2API_REDIS_MODE)"
+    local -a profiles=()
+    [[ "${postgres_mode:-managed}" == "managed" ]] && profiles+=(--profile managed-postgres)
+    [[ "${redis_mode:-managed}" == "managed" ]] && profiles+=(--profile managed-redis)
+    COMPOSE_PROJECT_NAME="${SUB2API_PROJECT_NAME}" docker compose \
+        --env-file "${SUB2API_ENV_FILE}" \
+        -f "${SUB2API_COMPOSE_FILE}" "${profiles[@]}" "$@"
+}
+
+sub2api_compose_all() {
+    COMPOSE_PROJECT_NAME="${SUB2API_PROJECT_NAME}" docker compose \
+        --env-file "${SUB2API_ENV_FILE}" \
+        -f "${SUB2API_COMPOSE_FILE}" \
+        --profile managed-postgres --profile managed-redis "$@"
+}
+
+generate_hex_secret() {
+    local bytes="${1:-32}" secret=""
+    if command -v openssl &>/dev/null; then
+        secret="$(openssl rand -hex "${bytes}")"
+    elif command -v od &>/dev/null && [[ -r /dev/urandom ]]; then
+        secret="$(LC_ALL=C od -An -N "${bytes}" -tx1 /dev/urandom | tr -d ' \n')"
+    fi
+    if [[ "${#secret}" -ne $((bytes * 2)) || ! "${secret}" =~ ^[a-f0-9]+$ ]]; then
+        error "无法生成安全随机密钥；请安装 openssl"
+        return 1
+    fi
+    printf '%s' "${secret}"
+}
+
+sub2api_env_value() {
+    local key="$1"
+    awk -F= -v wanted="${key}" '
+        $1 == wanted {
+            sub(/^[^=]*=/, "")
+            sub(/\r$/, "")
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            gsub(/^"|"$/, "")
+            print
+            exit
+        }
+    ' "${SUB2API_ENV_FILE}"
+}
+
+sub2api_port_in_use() {
+    local port="$1"
+    if command -v ss &>/dev/null && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:|\\])${port}$"; then
+        return 0
+    fi
+    if command -v lsof &>/dev/null && lsof -nP -iTCP:"${port}" -sTCP:LISTEN &>/dev/null; then
+        return 0
+    fi
+    docker ps --format '{{.Ports}}' 2>/dev/null | grep -Eq "(^|[.:])${port}->" && return 0
+    return 1
+}
+
+choose_sub2api_port() {
+    local port
+    for port in 8321 18321 28321 38321 48321; do
+        if ! sub2api_port_in_use "${port}"; then
+            printf '%s' "${port}"
+            return 0
+        fi
+    done
+    error "无法找到可用的 Sub2API 宿主端口"
+    return 1
+}
+
+create_sub2api_env() {
+    SUB2API_ENV_CREATED=false
+    SUB2API_NEW_ADMIN_PASSWORD=""
+
+    if [[ -e "${SUB2API_ENV_FILE}" ]]; then
+        assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+        chmod 600 "${SUB2API_ENV_FILE}" 2>/dev/null || true
+        return 0
+    fi
+
+    assert_safe_path "${SUB2API_ENV_FILE}" true || return 1
+    assert_regular_file "${SUB2API_ENV_EXAMPLE_FILE}" || return 1
+
+    local postgres_password redis_password admin_password jwt_secret totp_key temp_file host_port
+    postgres_password="$(generate_hex_secret 24)" || return 1
+    redis_password="$(generate_hex_secret 24)" || return 1
+    admin_password="$(generate_hex_secret 18)" || return 1
+    jwt_secret="$(generate_hex_secret 32)" || return 1
+    totp_key="$(generate_hex_secret 32)" || return 1
+    host_port="$(choose_sub2api_port)" || return 1
+    temp_file="$(umask 077; mktemp "${SCRIPT_DIR}/sub2api.env.tmp.XXXXXX")" || {
+        error "无法创建 Sub2API 临时配置文件"
+        return 1
+    }
+    assert_safe_path "${temp_file}" true || return 1
+
+    (
+        umask 077
+        cat > "${temp_file}" <<EOF
+# Generated by CLI Proxy Manager. Keep this file private.
+SUB2API_BIND_HOST=127.0.0.1
+SUB2API_PORT=${host_port}
+SUB2API_IMAGE=weishaw/sub2api:latest
+SUB2API_POSTGRES_IMAGE=postgres:18-alpine
+SUB2API_REDIS_IMAGE=redis:8-alpine
+SUB2API_SERVER_MODE=release
+SUB2API_RUN_MODE=standard
+SUB2API_TZ=Asia/Shanghai
+# Set each dependency to managed or external independently.
+SUB2API_POSTGRES_MODE=managed
+SUB2API_DATABASE_HOST=postgres
+SUB2API_DATABASE_PORT=5432
+SUB2API_POSTGRES_USER=sub2api
+SUB2API_POSTGRES_PASSWORD=${postgres_password}
+SUB2API_POSTGRES_DB=sub2api
+SUB2API_DATABASE_SSLMODE=disable
+SUB2API_REDIS_MODE=managed
+SUB2API_REDIS_HOST=redis
+SUB2API_REDIS_PORT=6379
+SUB2API_REDIS_PASSWORD=${redis_password}
+SUB2API_REDIS_DB=0
+SUB2API_ADMIN_EMAIL=admin@sub2api.local
+SUB2API_ADMIN_PASSWORD=${admin_password}
+SUB2API_JWT_SECRET=${jwt_secret}
+SUB2API_TOTP_ENCRYPTION_KEY=${totp_key}
+SUB2API_URL_ALLOWLIST_ENABLED=false
+SUB2API_ALLOW_INSECURE_HTTP=true
+SUB2API_ALLOW_PRIVATE_HOSTS=true
+EOF
+        chmod 600 "${temp_file}" 2>/dev/null || true
+    ) || { rm -f "${temp_file}"; return 1; }
+
+    if [[ -e "${SUB2API_ENV_FILE}" ]]; then
+        rm -f "${temp_file}"
+        error "sub2api.env 已被其他进程创建，请重试"
+        return 1
+    fi
+    mv "${temp_file}" "${SUB2API_ENV_FILE}"
+    SUB2API_ENV_CREATED=true
+    SUB2API_NEW_ADMIN_PASSWORD="${admin_password}"
+}
+
+validate_sub2api_env() {
+    assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+    local key value bind_host port postgres_mode redis_mode database_host redis_host dependency_port
+    for key in SUB2API_POSTGRES_PASSWORD SUB2API_ADMIN_PASSWORD SUB2API_JWT_SECRET SUB2API_TOTP_ENCRYPTION_KEY; do
+        value="$(sub2api_env_value "${key}")"
+        [[ -n "${value}" ]] || { error "sub2api.env 缺少 ${key}"; return 1; }
+    done
+
+    postgres_mode="$(sub2api_env_value SUB2API_POSTGRES_MODE)"
+    redis_mode="$(sub2api_env_value SUB2API_REDIS_MODE)"
+    postgres_mode="${postgres_mode:-managed}"
+    redis_mode="${redis_mode:-managed}"
+    [[ "${postgres_mode}" == "managed" || "${postgres_mode}" == "external" ]] || {
+        error "SUB2API_POSTGRES_MODE 只能是 managed 或 external"
+        return 1
+    }
+    [[ "${redis_mode}" == "managed" || "${redis_mode}" == "external" ]] || {
+        error "SUB2API_REDIS_MODE 只能是 managed 或 external"
+        return 1
+    }
+
+    database_host="$(sub2api_env_value SUB2API_DATABASE_HOST)"
+    redis_host="$(sub2api_env_value SUB2API_REDIS_HOST)"
+    if [[ "${postgres_mode}" == "external" && -z "${database_host}" ]]; then
+        error "external PostgreSQL 模式要求 SUB2API_DATABASE_HOST"
+        return 1
+    fi
+    if [[ "${redis_mode}" == "external" && -z "${redis_host}" ]]; then
+        error "external Redis 模式要求 SUB2API_REDIS_HOST"
+        return 1
+    fi
+    database_host="${database_host:-postgres}"
+    redis_host="${redis_host:-redis}"
+    if [[ "${postgres_mode}" == "managed" && "${database_host}" != "postgres" ]]; then
+        error "managed PostgreSQL 模式要求 SUB2API_DATABASE_HOST=postgres"
+        return 1
+    fi
+    if [[ "${redis_mode}" == "managed" && "${redis_host}" != "redis" ]]; then
+        error "managed Redis 模式要求 SUB2API_REDIS_HOST=redis"
+        return 1
+    fi
+    if [[ "${postgres_mode}" == "external" && ( "${database_host}" == "127.0.0.1" || "${database_host}" == "localhost" ) ]]; then
+        error "外部 PostgreSQL 在宿主机时请使用 host.docker.internal，不能使用 localhost"
+        return 1
+    fi
+    if [[ "${redis_mode}" == "external" && ( "${redis_host}" == "127.0.0.1" || "${redis_host}" == "localhost" ) ]]; then
+        error "外部 Redis 在宿主机时请使用 host.docker.internal，不能使用 localhost"
+        return 1
+    fi
+    if [[ "${redis_mode}" == "managed" && -z "$(sub2api_env_value SUB2API_REDIS_PASSWORD)" ]]; then
+        error "managed Redis 模式要求 SUB2API_REDIS_PASSWORD"
+        return 1
+    fi
+
+    for key in SUB2API_DATABASE_PORT SUB2API_REDIS_PORT; do
+        dependency_port="$(sub2api_env_value "${key}")"
+        [[ -z "${dependency_port}" ]] && continue
+        [[ "${dependency_port}" =~ ^[0-9]+$ ]] && (( dependency_port >= 1 && dependency_port <= 65535 )) || {
+            error "${key} 必须是 1..65535 的整数"
+            return 1
+        }
+    done
+
+    bind_host="$(sub2api_env_value SUB2API_BIND_HOST)"
+    case "${bind_host:-127.0.0.1}" in
+        127.0.0.1|0.0.0.0) ;;
+        *) error "SUB2API_BIND_HOST 仅支持 127.0.0.1 或 0.0.0.0"; return 1 ;;
+    esac
+
+    port="$(sub2api_env_value SUB2API_PORT)"
+    port="${port:-8321}"
+    [[ "${port}" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || {
+        error "SUB2API_PORT 必须是 1..65535 的整数"
+        return 1
+    }
+}
+
+wait_for_sub2api_container() {
+    local container_name="$1" label="$2" status="" count
+    echo -en "     等待 ${label} 就绪 "
+    for count in $(seq 1 60); do
+        status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container_name}" 2>/dev/null || true)"
+        if [[ "${status}" == "healthy" ]]; then
+            echo ""
+            return 0
+        fi
+        if [[ "${status}" == "exited" || "${status}" == "dead" ]]; then
+            echo ""
+            return 1
+        fi
+        echo -n "·"
+        sleep 2
+    done
+    echo ""
+    return 1
+}
+
+start_sub2api_stack() {
+    local recreate="${1:-false}" postgres_mode redis_mode
+    local -a managed_services=() app_args=(up -d)
+    postgres_mode="$(sub2api_env_value SUB2API_POSTGRES_MODE)"
+    redis_mode="$(sub2api_env_value SUB2API_REDIS_MODE)"
+    postgres_mode="${postgres_mode:-managed}"
+    redis_mode="${redis_mode:-managed}"
+
+    if [[ "${postgres_mode}" == "managed" ]]; then
+        managed_services+=(postgres)
+    else
+        sub2api_compose_all stop postgres >/dev/null 2>&1 || true
+    fi
+    if [[ "${redis_mode}" == "managed" ]]; then
+        managed_services+=(redis)
+    else
+        sub2api_compose_all stop redis >/dev/null 2>&1 || true
+    fi
+
+    if (( ${#managed_services[@]} > 0 )); then
+        sub2api_compose up -d "${managed_services[@]}"
+    fi
+    if [[ "${postgres_mode}" == "managed" ]]; then
+        wait_for_sub2api_container "${SUB2API_POSTGRES_CONTAINER_NAME}" "PostgreSQL" || return 1
+    fi
+    if [[ "${redis_mode}" == "managed" ]]; then
+        wait_for_sub2api_container "${SUB2API_REDIS_CONTAINER_NAME}" "Redis" || return 1
+    fi
+
+    [[ "${recreate}" == "true" ]] && app_args+=(--force-recreate)
+    app_args+=(sub2api)
+    sub2api_compose "${app_args[@]}"
+    wait_for_sub2api_container "${SUB2API_CONTAINER_NAME}" "Sub2API"
+}
+
+show_sub2api_result() {
+    local bind_host port admin_email display_host postgres_mode redis_mode
+    bind_host="$(sub2api_env_value SUB2API_BIND_HOST)"
+    port="$(sub2api_env_value SUB2API_PORT)"
+    admin_email="$(sub2api_env_value SUB2API_ADMIN_EMAIL)"
+    display_host="${bind_host:-127.0.0.1}"
+    [[ "${display_host}" == "0.0.0.0" ]] && display_host="127.0.0.1"
+    postgres_mode="$(sub2api_env_value SUB2API_POSTGRES_MODE)"
+    redis_mode="$(sub2api_env_value SUB2API_REDIS_MODE)"
+
+    echo ""
+    detail "访问地址: http://${display_host}:${port:-8321}"
+    detail "管理员邮箱: ${admin_email:-admin@sub2api.local}"
+    detail "PostgreSQL 模式: ${postgres_mode:-managed}"
+    detail "Redis 模式: ${redis_mode:-managed}"
+    detail "配置文件: ${SUB2API_ENV_FILE}"
+    if [[ "${SUB2API_ENV_CREATED}" == "true" ]]; then
+        detail "首次管理员密码: ${SUB2API_NEW_ADMIN_PASSWORD}"
+        warn "请立即保存密码，并保护 sub2api.env"
+    fi
+}
+
+prepare_sub2api() {
+    require_sub2api_compose || return 1
+    create_sub2api_env || return 1
+    validate_sub2api_env || return 1
+    sub2api_compose config --quiet || { error "Sub2API Compose 配置校验失败"; return 1; }
+}
+
+cmd_sub2api_init() {
+    step "生成 Sub2API 配置"
+    assert_regular_file "${SUB2API_COMPOSE_FILE}" || return 1
+    create_sub2api_env || return 1
+    validate_sub2api_env || return 1
+    info "Sub2API 配置已准备"
+    detail "配置文件: ${SUB2API_ENV_FILE}"
+    detail "默认模式: managed PostgreSQL + managed Redis"
+    warn "如需混合部署，请先编辑两个 MODE 和对应的 HOST/PORT，再运行 deploy"
+    if [[ "${SUB2API_ENV_CREATED}" == "true" ]]; then
+        detail "首次管理员密码: ${SUB2API_NEW_ADMIN_PASSWORD}"
+        warn "请立即保存密码，并保护 sub2api.env"
+    fi
+}
+
+cmd_sub2api_deploy() {
+    step "一键部署 Sub2API"
+    prepare_sub2api || return 1
+    sub2api_compose pull
+    if start_sub2api_stack; then
+        info "Sub2API 已启动"
+        show_sub2api_result
+    else
+        error "Sub2API 未通过健康检查"
+        sub2api_compose logs --tail 80 sub2api || true
+        return 1
+    fi
+}
+
+cmd_sub2api_start() {
+    step "启动 Sub2API"
+    prepare_sub2api || return 1
+    start_sub2api_stack || { error "Sub2API 或托管依赖未通过健康检查"; return 1; }
+    info "Sub2API 已启动"
+    show_sub2api_result
+}
+
+cmd_sub2api_stop() {
+    require_sub2api_compose || return 1
+    assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+    step "停止 Sub2API"
+    sub2api_compose_all stop
+    info "Sub2API 已停止，数据卷已保留"
+}
+
+cmd_sub2api_restart() {
+    step "重建并重启 Sub2API"
+    prepare_sub2api || return 1
+    start_sub2api_stack true || { error "Sub2API 或托管依赖未通过健康检查"; return 1; }
+    info "Sub2API 已重新启动"
+    show_sub2api_result
+}
+
+cmd_sub2api_status() {
+    require_sub2api_compose || return 1
+    assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+    step "Sub2API 状态"
+    sub2api_compose_all ps
+    local health
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${SUB2API_CONTAINER_NAME}" 2>/dev/null || true)"
+    detail "应用健康状态: ${health:-not-created}"
+    show_sub2api_result
+}
+
+cmd_sub2api_logs() {
+    local service="${1:-sub2api}"
+    require_sub2api_compose || return 1
+    assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+    sub2api_compose_all logs -f --tail 200 "${service}"
+}
+
+cmd_sub2api_update() {
+    step "更新 Sub2API 栈"
+    prepare_sub2api || return 1
+    sub2api_compose pull
+    start_sub2api_stack || { error "更新后健康检查失败"; sub2api_compose logs --tail 80 sub2api || true; return 1; }
+    info "Sub2API 已更新并通过健康检查"
+}
+
+cmd_sub2api_doctor() {
+    step "检查 Sub2API 部署"
+    require_sub2api_compose || return 1
+    assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+    validate_sub2api_env || return 1
+    sub2api_compose config --quiet || { error "Sub2API Compose 配置校验失败"; return 1; }
+    info "Compose 配置有效"
+    local bind_host
+    bind_host="$(sub2api_env_value SUB2API_BIND_HOST)"
+    if [[ "${bind_host}" == "0.0.0.0" ]]; then
+        warn "Sub2API 当前对所有网络接口开放"
+        detail "请使用防火墙和 HTTPS 反向代理"
+    else
+        info "Sub2API 仅绑定本机"
+    fi
+    cmd_sub2api_status
+}
+
+cmd_sub2api_uninstall() {
+    require_sub2api_compose || return 1
+    assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+    echo ""
+    warn "即将卸载 Sub2API 容器"
+    if ! confirm "确认停止并删除 Sub2API 容器和网络？" "n"; then
+        info "取消卸载"
+        return 0
+    fi
+
+    local delete_volumes=false
+    if confirm "是否永久删除 Sub2API、PostgreSQL 和 Redis 数据卷？" "n"; then
+        delete_volumes=true
+    fi
+
+    if $delete_volumes; then
+        sub2api_compose_all down -v
+        info "Sub2API 容器、网络和数据卷已删除"
+    else
+        sub2api_compose_all down
+        info "Sub2API 容器和网络已删除，数据卷仍保留"
+    fi
+
+    if ! $delete_volumes; then
+        warn "数据卷已保留"
+    fi
+
+    if confirm "是否删除包含密钥的 sub2api.env？" "n"; then
+        assert_regular_file "${SUB2API_ENV_FILE}" || return 1
+        rm -f "${SUB2API_ENV_FILE}"
+        info "sub2api.env 已删除"
+    fi
+}
+
+show_sub2api_help() {
+    echo ""
+    echo -e "  ${BOLD}Sub2API companion stack${NC}"
+    echo -e "  bash deploy.sh sub2api ${DIM}[action]${NC}"
+    echo ""
+    echo -e "    ${CYAN}deploy${NC}     生成密钥并一键部署（默认）"
+    echo -e "    ${CYAN}init${NC}       只生成配置，便于先选择依赖模式"
+    echo -e "    ${CYAN}start${NC}      启动或创建容器"
+    echo -e "    ${CYAN}stop${NC}       停止容器并保留数据"
+    echo -e "    ${CYAN}restart${NC}    重建并重启容器"
+    echo -e "    ${CYAN}status${NC}     查看容器和健康状态"
+    echo -e "    ${CYAN}logs [服务]${NC} 查看日志（默认 sub2api）"
+    echo -e "    ${CYAN}update${NC}     拉取最新镜像并重建"
+    echo -e "    ${CYAN}doctor${NC}     检查配置和暴露范围"
+    echo -e "    ${CYAN}uninstall${NC}  卸载；数据和密钥分别确认"
+    echo ""
+    echo -e "  ${DIM}依赖模式在 sub2api.env 中分别设置:${NC}"
+    echo -e "    SUB2API_POSTGRES_MODE=managed|external"
+    echo -e "    SUB2API_REDIS_MODE=managed|external"
+    echo ""
+}
+
+cmd_sub2api() {
+    local action="${1:-deploy}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${action}" in
+        deploy|install) cmd_sub2api_deploy ;;
+        init|configure) cmd_sub2api_init ;;
+        start) cmd_sub2api_start ;;
+        stop) cmd_sub2api_stop ;;
+        restart) cmd_sub2api_restart ;;
+        status) cmd_sub2api_status ;;
+        logs) cmd_sub2api_logs "${1:-sub2api}" ;;
+        update) cmd_sub2api_update ;;
+        doctor) cmd_sub2api_doctor ;;
+        uninstall) cmd_sub2api_uninstall ;;
+        help|--help|-h) show_sub2api_help ;;
+        *) error "未知 Sub2API 操作: ${action}"; show_sub2api_help; return 1 ;;
+    esac
+}
+
 # ========================== 帮助信息 ==========================================
 
 show_help() {
@@ -1768,7 +3733,8 @@ show_help() {
     echo -e "    ${CYAN}restart${NC}      重启服务"
     echo -e "    ${CYAN}status${NC}       查看服务状态"
     echo -e "    ${CYAN}logs${NC}         查看实时日志"
-    echo -e "    ${CYAN}doctor${NC}       自检 Docker/配置/凭证/API"
+    echo -e "    ${CYAN}capabilities [--json]${NC} 只读 CPA 能力和暴露检查"
+    echo -e "    ${CYAN}doctor${NC}       Doctor v2 只读诊断"
     echo -e "    ${CYAN}backup [文件]${NC} 备份配置和 OAuth 凭证"
     echo -e "    ${CYAN}restore <文件>${NC} 恢复配置和 OAuth 凭证"
     echo -e "    ${CYAN}check-update${NC}  只检查镜像是否有更新"
@@ -1780,11 +3746,13 @@ show_help() {
     echo -e "    ${CYAN}disable-auto-update${NC} 禁用自动更新"
     echo -e "    ${CYAN}uninstall${NC}    完全卸载"
     echo -e "    ${CYAN}setup-claude${NC} 自动配置 Claude Code 环境"
+    echo -e "    ${CYAN}sub2api [操作]${NC} 管理独立的 Sub2API 一键部署"
     echo -e "    ${CYAN}help${NC}         显示此帮助"
     echo ""
     echo -e "  ${BOLD}环境变量:${NC}"
     echo -e "    ${CYAN}CPA_PORT${NC}     服务端口 (默认: 8317)"
     echo -e "    ${CYAN}CPA_API_KEY${NC}  API 密钥"
+    echo -e "    ${CYAN}CPA_EXPOSURE_MODE${NC} 可选: public-proxy (仅用于能力分类)"
     echo ""
     echo -e "  ${BOLD}示例:${NC}"
     echo -e "    ${DIM}# 完整部署${NC}"
@@ -1794,22 +3762,25 @@ show_help() {
     echo -e "    CPA_PORT=9000 bash deploy.sh start"
     echo ""
     echo -e "    ${DIM}# 自检并备份${NC}"
+    echo -e "    bash deploy.sh capabilities --json"
     echo -e "    bash deploy.sh doctor"
     echo -e "    bash deploy.sh backup"
+    echo ""
+    echo -e "    ${DIM}# 一键部署独立 Sub2API 栈${NC}"
+    echo -e "    bash deploy.sh sub2api deploy"
     echo ""
     echo -e "    ${DIM}# 启用每日自动更新（默认 04:20）${NC}"
     echo -e "    bash deploy.sh enable-auto-update"
     echo -e "    bash deploy.sh enable-auto-update \"20 4 * * *\""
     echo ""
     echo -e "    ${DIM}# 远程一键安装${NC}"
-    echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash"
+    echo -e "    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.sh | bash"
     echo ""
 }
 
 # ========================== 入口 ==============================================
 
-main() {
-    # 加载 .env（逐行解析，不 source，避免代码注入）
+load_project_env() {
     if [[ -f "${SCRIPT_DIR}/.env" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line#"${line%%[![:space:]]*}"}"
@@ -1824,9 +3795,14 @@ main() {
             export "$key=$value"
         done < "${SCRIPT_DIR}/.env"
     fi
-
+    CPA_PORT="${CPA_PORT:-8317}"
+    CPA_API_KEY="${CPA_API_KEY:-}"
+    CPA_MANAGEMENT_KEY="${CPA_MANAGEMENT_KEY:-}"
     DOCKER_IMAGE="${CPA_IMAGE:-eceasy/cli-proxy-api:latest}"
+}
 
+main() {
+    load_project_env
     case "${1:-}" in
 
         login)      cmd_login ;;
@@ -1836,6 +3812,7 @@ main() {
         restart)    cmd_restart ;;
         status)     cmd_status ;;
         logs)       cmd_logs ;;
+        capabilities) shift; cmd_capabilities "$@" ;;
         doctor)     cmd_doctor ;;
         backup)     shift; cmd_backup "${1:-}" ;;
         restore)    shift; cmd_restore "${1:-}" ;;
@@ -1848,6 +3825,7 @@ main() {
         disable-auto-update) cmd_disable_auto_update ;;
         uninstall)  cmd_uninstall ;;
         setup-claude) cmd_setup_claude ;;
+        sub2api) shift; cmd_sub2api "$@" ;;
         help|--help|-h) show_help ;;
         "")         cmd_deploy ;;
         *)          error "未知命令: $1"; show_help; exit 1 ;;

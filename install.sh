@@ -4,13 +4,13 @@
 #  远程一键安装脚本
 #
 #  Usage / 用法:
-#    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash
-#    REPO_URL=https://github.com/MaykeZhs/cli-proxy-manager bash install.sh
+#    curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.sh | bash
+#    REPO_URL=https://github.com/MaykeZhs/cli-proxy-deploy bash install.sh
 # =============================================================================
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/MaykeZhs/cli-proxy-manager}"
+REPO_URL="${REPO_URL:-https://github.com/MaykeZhs/cli-proxy-deploy}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.cli-proxy-manager}"
 BRANCH="${BRANCH:-main}"
 

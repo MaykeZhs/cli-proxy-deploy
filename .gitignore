@@ -3,6 +3,8 @@ config.yaml
 .env
 .env.local
 .env.*.local
+sub2api.env
+sub2api.env.tmp.*
 
 # OS files
 .DS_Store
@@ -19,6 +21,7 @@ pnpm-debug.log*
 auth/
 backups/
 cli-proxy-manager-backup-*.tgz
+sub2api-manager-backup-*.tgz
 
 # Local workspace state
 .codex/

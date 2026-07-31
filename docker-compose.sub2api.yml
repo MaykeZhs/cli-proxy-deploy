@@ -1,0 +1,136 @@
+# =============================================================================
+#  Optional Sub2API stack for CLI Proxy Manager
+#  Based on the official Wei-Shaw/sub2api Docker Compose deployment contract.
+# =============================================================================
+
+name: sub2api-manager
+
+services:
+  sub2api:
+    image: ${SUB2API_IMAGE:-weishaw/sub2api:latest}
+    container_name: sub2api-manager
+    restart: unless-stopped
+    ports:
+      - "${SUB2API_BIND_HOST:-127.0.0.1}:${SUB2API_PORT:-8321}:8080"
+    volumes:
+      - sub2api-data:/app/data
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      SERVER_MODE: ${SUB2API_SERVER_MODE:-release}
+      RUN_MODE: ${SUB2API_RUN_MODE:-standard}
+
+      DATABASE_HOST: ${SUB2API_DATABASE_HOST:-postgres}
+      DATABASE_PORT: "${SUB2API_DATABASE_PORT:-5432}"
+      DATABASE_USER: ${SUB2API_POSTGRES_USER:-sub2api}
+      DATABASE_PASSWORD: ${SUB2API_POSTGRES_PASSWORD:?SUB2API_POSTGRES_PASSWORD is required}
+      DATABASE_DBNAME: ${SUB2API_POSTGRES_DB:-sub2api}
+      DATABASE_SSLMODE: "${SUB2API_DATABASE_SSLMODE:-disable}"
+      DATABASE_MAX_OPEN_CONNS: ${SUB2API_DATABASE_MAX_OPEN_CONNS:-50}
+      DATABASE_MAX_IDLE_CONNS: ${SUB2API_DATABASE_MAX_IDLE_CONNS:-10}
+
+      REDIS_HOST: ${SUB2API_REDIS_HOST:-redis}
+      REDIS_PORT: "${SUB2API_REDIS_PORT:-6379}"
+      REDIS_PASSWORD: ${SUB2API_REDIS_PASSWORD:-}
+      REDIS_DB: "${SUB2API_REDIS_DB:-0}"
+
+      ADMIN_EMAIL: ${SUB2API_ADMIN_EMAIL:-admin@sub2api.local}
+      ADMIN_PASSWORD: ${SUB2API_ADMIN_PASSWORD:?SUB2API_ADMIN_PASSWORD is required}
+      JWT_SECRET: ${SUB2API_JWT_SECRET:?SUB2API_JWT_SECRET is required}
+      JWT_EXPIRE_HOUR: ${SUB2API_JWT_EXPIRE_HOUR:-24}
+      TOTP_ENCRYPTION_KEY: ${SUB2API_TOTP_ENCRYPTION_KEY:?SUB2API_TOTP_ENCRYPTION_KEY is required}
+
+      SECURITY_URL_ALLOWLIST_ENABLED: ${SUB2API_URL_ALLOWLIST_ENABLED:-false}
+      SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP: ${SUB2API_ALLOW_INSECURE_HTTP:-true}
+      SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS: ${SUB2API_ALLOW_PRIVATE_HOSTS:-true}
+      TZ: ${SUB2API_TZ:-Asia/Shanghai}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    profiles: ["managed-postgres"]
+    image: ${SUB2API_POSTGRES_IMAGE:-postgres:18-alpine}
+    container_name: sub2api-manager-postgres
+    restart: unless-stopped
+    volumes:
+      - sub2api-postgres:/var/lib/postgresql/data
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_USER: ${SUB2API_POSTGRES_USER:-sub2api}
+      POSTGRES_PASSWORD: ${SUB2API_POSTGRES_PASSWORD:?SUB2API_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${SUB2API_POSTGRES_DB:-sub2api}
+      TZ: ${SUB2API_TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SUB2API_POSTGRES_USER:-sub2api} -d ${SUB2API_POSTGRES_DB:-sub2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    profiles: ["managed-redis"]
+    image: ${SUB2API_REDIS_IMAGE:-redis:8-alpine}
+    container_name: sub2api-manager-redis
+    restart: unless-stopped
+    volumes:
+      - sub2api-redis:/data
+    command:
+      - sh
+      - -c
+      - >-
+        exec redis-server
+        --save 60 1
+        --appendonly yes
+        --appendfsync everysec
+        --requirepass "$${REDIS_PASSWORD}"
+    environment:
+      REDIS_PASSWORD: ${SUB2API_REDIS_PASSWORD:-}
+      REDISCLI_AUTH: ${SUB2API_REDIS_PASSWORD:-}
+      TZ: ${SUB2API_TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  sub2api-data:
+    name: sub2api-manager-data
+  sub2api-postgres:
+    name: sub2api-manager-postgres
+  sub2api-redis:
+    name: sub2api-manager-redis
+
+networks:
+  sub2api-network:
+    name: sub2api-manager-network
+    driver: bridge

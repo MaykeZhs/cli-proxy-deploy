@@ -32,6 +32,7 @@
 | 🔁 完整生命周期管理 / Full lifecycle | start / stop / restart / update / uninstall |
 | 🩺 一键自检 / One-command doctor | 检查 Docker、配置、凭证和 `/v1/models` / Check Docker, config, credentials, and `/v1/models` |
 | 💾 备份恢复 / Backup & restore | 备份 `config.yaml` 和 OAuth 凭证卷 / Back up `config.yaml` and OAuth credential volume |
+| 🌉 可选 Sub2API 栈 / Optional Sub2API stack | 独立部署 Sub2API + PostgreSQL + Redis / Isolated Sub2API + PostgreSQL + Redis deployment |
 | 🪟 Windows 原生支持 / Windows native | PowerShell 部署脚本 / PowerShell deploy scripts |
 
 ---
@@ -61,14 +62,14 @@
 
 ```bash
 # Download the installer and run it with Bash
-curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.sh | bash
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 # Download the installer to the current folder, then run it
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.ps1 -OutFile install.ps1; .\install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
 > 如果执行策略阻止脚本，请使用：`pwsh -ExecutionPolicy Bypass -File .\install.ps1`
@@ -79,10 +80,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-mana
 
 ```bash
 # Download the project
-git clone https://github.com/MaykeZhs/cli-proxy-manager.git
+git clone https://github.com/MaykeZhs/cli-proxy-deploy.git
 
 # Enter the project folder
-cd cli-proxy-manager
+cd cli-proxy-deploy
 
 # Start the interactive deployment
 bash deploy.sh
@@ -92,10 +93,10 @@ bash deploy.sh
 
 ```powershell
 # Download the project
-git clone https://github.com/MaykeZhs/cli-proxy-manager.git
+git clone https://github.com/MaykeZhs/cli-proxy-deploy.git
 
 # Enter the project folder
-cd cli-proxy-manager
+cd cli-proxy-deploy
 
 # Start the interactive deployment
 .\deploy.ps1
@@ -127,14 +128,14 @@ Installs to `~/.cli-proxy-manager` (Windows: `%USERPROFILE%\.cli-proxy-manager`)
 
 ```bash
 # Download the installer and run it with Bash
-curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.sh | bash
 ```
 
 **Windows (PowerShell 7+ / pwsh):**
 
 ```powershell
 # Download the installer to the current folder, then run it
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.ps1 -OutFile install.ps1; .\install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.ps1 -OutFile install.ps1; .\install.ps1
 ```
 
 > If the execution policy blocks the script: `pwsh -ExecutionPolicy Bypass -File .\install.ps1`
@@ -145,10 +146,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-mana
 
 ```bash
 # Download the project
-git clone https://github.com/MaykeZhs/cli-proxy-manager.git
+git clone https://github.com/MaykeZhs/cli-proxy-deploy.git
 
 # Enter the project folder
-cd cli-proxy-manager
+cd cli-proxy-deploy
 
 # Start the interactive deployment
 bash deploy.sh
@@ -158,10 +159,10 @@ bash deploy.sh
 
 ```powershell
 # Download the project
-git clone https://github.com/MaykeZhs/cli-proxy-manager.git
+git clone https://github.com/MaykeZhs/cli-proxy-deploy.git
 
 # Enter the project folder
-cd cli-proxy-manager
+cd cli-proxy-deploy
 
 # Start the interactive deployment
 .\deploy.ps1
@@ -192,7 +193,7 @@ After startup, run `doctor` first. It checks Docker, the container, `config.yaml
 **Linux / macOS:**
 
 ```bash
-cd cli-proxy-manager
+cd cli-proxy-deploy
 bash deploy.sh doctor
 
 # Service status and loaded credentials
@@ -214,7 +215,7 @@ curl -i http://127.0.0.1:8317/v1/models \
 **Windows (PowerShell):**
 
 ```powershell
-cd cli-proxy-manager
+cd cli-proxy-deploy
 .\deploy.ps1 doctor
 
 # Service status and loaded credentials
@@ -458,6 +459,7 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 重启服务 / Restart service | `bash deploy.sh restart` | `.\deploy.ps1 restart` |
 | 查看状态 / Check status | `bash deploy.sh status` | `.\deploy.ps1 status` |
 | 实时日志 / Real-time logs | `bash deploy.sh logs` | `.\deploy.ps1 logs` |
+| 只读能力检查 / Read-only capabilities | `bash deploy.sh capabilities [--json]` | `.\deploy.ps1 capabilities [--json]` |
 | 一键自检 / Doctor check | `bash deploy.sh doctor` | `.\deploy.ps1 doctor` |
 | 备份配置和凭证 / Backup config and credentials | `bash deploy.sh backup` | `.\deploy.ps1 backup` |
 | 恢复配置和凭证 / Restore config and credentials | `bash deploy.sh restore <file>` | `.\deploy.ps1 restore <file>` |
@@ -468,6 +470,15 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | 启用自动更新 / Enable auto-update | `bash deploy.sh enable-auto-update [计划]` | — |
 | 查看自动更新状态 / Auto-update status | `bash deploy.sh auto-update-status` | — |
 | 禁用自动更新 / Disable auto-update | `bash deploy.sh disable-auto-update` | — |
+| Sub2API 一键部署 / Deploy Sub2API | `bash deploy.sh sub2api deploy` | `.\deploy.ps1 sub2api deploy` |
+| Sub2API 启动 / Start Sub2API | `bash deploy.sh sub2api start` | `.\deploy.ps1 sub2api start` |
+| Sub2API 停止 / Stop Sub2API | `bash deploy.sh sub2api stop` | `.\deploy.ps1 sub2api stop` |
+| Sub2API 重建 / Recreate Sub2API | `bash deploy.sh sub2api restart` | `.\deploy.ps1 sub2api restart` |
+| Sub2API 状态 / Sub2API status | `bash deploy.sh sub2api status` | `.\deploy.ps1 sub2api status` |
+| Sub2API 日志 / Sub2API logs | `bash deploy.sh sub2api logs` | `.\deploy.ps1 sub2api logs` |
+| Sub2API 更新 / Update Sub2API | `bash deploy.sh sub2api update` | `.\deploy.ps1 sub2api update` |
+| Sub2API 自检 / Sub2API doctor | `bash deploy.sh sub2api doctor` | `.\deploy.ps1 sub2api doctor` |
+| Sub2API 卸载 / Uninstall Sub2API | `bash deploy.sh sub2api uninstall` | `.\deploy.ps1 sub2api uninstall` |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
 | 显示帮助 / Show help | `bash deploy.sh help` | `.\deploy.ps1 help` |
@@ -540,9 +551,54 @@ The scheduling commands, `enable-auto-update` and `disable-auto-update`, are Lin
 
 ### 自检、备份和恢复 / Doctor, Backup, and Restore
 
-`doctor` 适合排错前先跑：它会告诉你 Docker、Compose、配置文件、容器、端口、OAuth 凭证和 `/v1/models` 哪一步有问题。
+`capabilities` 是严格只读探针：它不会拉取镜像、创建辅助容器、启动/停止服务、打开浏览器或修改配置。它只输出 Provider 数量和脱敏后的插件摘要，不输出凭证文件名、邮箱、账号/模型 ID、插件配置、密钥或哈希。
 
-Run `doctor` before manual troubleshooting. It shows which layer is broken: Docker, Compose, config file, container, port, OAuth credentials, or `/v1/models`.
+`capabilities` is a strictly read-only probe. It does not pull images, create helper containers, change service state, open a browser, or edit configuration. It uses local GET requests only. It reports provider and plugin summaries plus redacted routing booleans, never credential filenames, emails, account/model IDs, priority/weight values, plugin configuration, keys, or hashes.
+
+```bash
+bash deploy.sh capabilities
+bash deploy.sh capabilities --json
+```
+
+```powershell
+.\deploy.ps1 capabilities
+.\deploy.ps1 capabilities --json
+```
+
+The JSON contract uses `schema_version: 1`. Unavailable values are `null`. Both scripts use the same top-level objects:
+
+| Object | Fields |
+|---|---|
+| `manager` | Manager script `version` |
+| `container` | Container `name` and `running` state |
+| `network` | Configured/actual address and port, plus `exposure_mode` |
+| `image` | Image reference, local image ID, and local repository digest |
+| `cpa` | CPA version and commit from safe startup-log parsing or authenticated CPA response headers |
+| `release_contract` | Exact CPA v7.2.111 and Management Center v1.20.4 tag commits, source, target-pair compatibility, and observed runtime compatibility |
+| `api` | Health status, HTTP status codes, and model count only |
+| `remote_management` | Enabled settings as booleans; no key or hash |
+| `management_ui` | Enabled/reachable state, safely detected Management Center version, HTTP status, safe loopback URL, remote-access setting, external HTTPS verification, and public warning state |
+| `official_capabilities` | Audited Management API, auth-files, account-status, priority, quota-reset, routing, and plugin support flags |
+| `routing` | Strategy, WRR/priority/weight configuration booleans, session-affinity state and TTL, automatic-failover support, and WRR traffic-validation state |
+| `plugins` | Authenticated inspection state and safe plugin ID/name/version/enabled/menu-count fields only |
+| `security` | Whether plugin resource pages use management authentication and whether direct-public exposure is critical |
+| `credentials` | API-first provider counts for Antigravity, Claude, Codex, Gemini, Kimi, xAI, and future types; filename counting is a labeled fallback |
+| `recovery` | Latest CPA backup time and previous-image availability |
+| `warnings` | Stable warning code, severity (`warning`, `critical`, or `failure`), and safe message |
+
+The D2.2 source contract is pinned to [CLIProxyAPI v7.2.111 at `4a31513`](https://github.com/router-for-me/CLIProxyAPI/commit/4a315136730baa8b3a436d12b74e5a702c70be5c) and [Management Center v1.20.4 at `826ea3c`](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/commit/826ea3c0d0bdd6409a0a2703ada90faaf5aede2d), not newer default branches. `wrr_traffic_validation` remains `not_run`; capability support is not traffic acceptance, especially when no credentials or models exist.
+
+Exposure modes are `local`, `direct-public`, `public-proxy`, or `unknown`. `public-proxy` requires a loopback binding plus the optional read-only hint `CPA_EXPOSURE_MODE=public-proxy`; this hint never changes Docker networking.
+
+External HTTPS protection is `null` when the local probe cannot verify it. The probe never treats `CPA_EXPOSURE_MODE=public-proxy` as proof that HTTPS exists.
+
+When a plaintext `CPA_MANAGEMENT_KEY` is available in the process environment or the local `.env`, the probe uses authenticated read-only GET requests to `/v0/management/auth-files`, `/v0/management/plugins`, and `/v0/management/routing/strategy`. If the key is unavailable, it does not call protected Management API routes. Provider counts may then use the clearly marked `filename_fallback`; plugin inventory stays unavailable.
+
+Write-capability flags are contract information only. For the audited CLIProxyAPI `v7.2.102` build (`8423cce`), the probe can report priority-write and quota-reset support without sending a write request. It never sends POST, PUT, PATCH, or DELETE.
+
+Security note: in the audited `v7.2.102` route contract, plugin resource pages under `/v0/resource/plugins/...` are outside Management API authentication. Doctor reports a critical warning when those pages and remote management are exposed through direct-public HTTP.
+
+`doctor` reuses the same probe and adds clear pass, warning, and failure messages for Docker, Compose, configuration, the actual port binding, recovery, and the local CPA API.
 
 ```bash
 bash deploy.sh doctor
@@ -588,6 +644,7 @@ cp .env.example .env
 | 变量 / Variable | 默认值 / Default | 说明 / Description |
 |---|---|---|
 | `CPA_BIND_HOST` | `127.0.0.1` | 监听地址。本机使用保持默认；云服务器需外部访问时改为 `0.0.0.0` / Bind address. Keep default for local; set `0.0.0.0` to expose on cloud servers |
+| `CPA_EXPOSURE_MODE` | *(auto-detected)* | 可选只读分类提示。CPA 绑定 loopback 并位于 HTTPS 反向代理后时设为 `public-proxy`；不会修改端口 / Optional read-only classification hint; use `public-proxy` only for loopback CPA behind an HTTPS reverse proxy |
 | `CPA_PORT` | `8317` | 服务端口 / Service port |
 | `CPA_IMAGE` | `eceasy/cli-proxy-api:latest` | 容器镜像；Docker Hub 不可用时可改为可信镜像代理 / Container image; may use a trusted registry proxy when Docker Hub is unavailable |
 | `CPA_PULL_POLICY` | `always` | 直接运行 Compose 时检查并拉取镜像；部署脚本会先显式拉取，成功后以 `never` 启动，事务更新和回滚也使用 `never` / Direct Compose starts pull first; deploy scripts explicitly pull before starting with `never`, and transactional update/rollback also use `never` |
@@ -627,6 +684,136 @@ CPA_PORT=9000 bash deploy.sh start
 # 自定义端口启动 / Start with custom port
 $env:CPA_PORT=9000; .\deploy.ps1 start
 ```
+
+### 可选 Sub2API 一键部署 / Optional Sub2API One-Click Deployment
+
+本项目可以把 [Sub2API](https://github.com/Wei-Shaw/sub2api) 作为**独立 companion stack** 按需部署。它不会加入 CLIProxyAPI 的 Compose project，也不会读取 `config.yaml` 或 OAuth 凭证卷。PostgreSQL 和 Redis 可以分别选择由本项目托管，或连接外部服务。
+
+This project can deploy [Sub2API](https://github.com/Wei-Shaw/sub2api) as an **isolated, on-demand companion stack**. It does not join the CLIProxyAPI Compose project and does not read `config.yaml` or the OAuth credential volume. PostgreSQL and Redis can each be managed by this project or supplied as an external service.
+
+- `sub2api-manager` — Sub2API Web/API service
+- `sub2api-manager-postgres` — optional managed PostgreSQL 18 database
+- `sub2api-manager-redis` — optional managed Redis 8 cache
+- Named volumes for the application and any managed dependencies
+
+首次运行会生成 Git 忽略的 `sub2api.env`，其中包含 PostgreSQL、Redis、管理员、JWT 和 TOTP 密钥。默认自动部署 PostgreSQL 和 Redis，并从 `8321`、`18321`、`28321`、`38321`、`48321` 中选择第一个空闲宿主端口。Sub2API 容器内部仍使用官方端口 `8080`，不会占用宿主机的 `8080`。PostgreSQL 和 Redis 不会映射到宿主机端口。
+
+On first run, the script creates a Git-ignored `sub2api.env` with PostgreSQL, Redis, admin, JWT, and TOTP secrets. It manages both dependencies by default and selects the first free host port from `8321`, `18321`, `28321`, `38321`, and `48321`. The container still uses the official internal port `8080`; host port `8080` is not used. PostgreSQL and Redis are not published to host ports.
+
+**Linux / macOS:**
+
+```bash
+bash deploy.sh sub2api deploy
+bash deploy.sh sub2api status
+```
+
+**Windows (PowerShell 7+):**
+
+```powershell
+.\deploy.ps1 sub2api deploy
+.\deploy.ps1 sub2api status
+```
+
+如果要在第一次启动前选择混合依赖模式，先只生成安全配置，再编辑并部署：
+
+```bash
+bash deploy.sh sub2api init
+nano sub2api.env
+bash deploy.sh sub2api deploy
+```
+
+```powershell
+.\deploy.ps1 sub2api init
+notepad sub2api.env
+.\deploy.ps1 sub2api deploy
+```
+
+首次部署成功后，终端会显示自动生成的管理员密码。以后可以在本机的 `sub2api.env` 中查看或修改管理员邮箱、端口、依赖模式和连接信息。修改后运行 `sub2api restart` 重建容器。
+
+After the first successful deployment, the terminal shows the generated admin password. Later, edit the local `sub2api.env` to change the admin email, port, dependency modes, or connection settings, then run `sub2api restart` to recreate the containers.
+
+```dotenv
+# Local-only by default
+SUB2API_BIND_HOST=127.0.0.1
+SUB2API_PORT=8321
+
+# Use 0.0.0.0 only behind a firewall and HTTPS reverse proxy
+# SUB2API_BIND_HOST=0.0.0.0
+```
+
+PostgreSQL 和 Redis 的模式互相独立，因此支持四种组合：
+
+| PostgreSQL | Redis | Result |
+|---|---|---|
+| `managed` | `managed` | 默认；自动部署两个依赖 |
+| `managed` | `external` | 只自动部署 PostgreSQL，连接外部 Redis |
+| `external` | `managed` | 连接外部 PostgreSQL，只自动部署 Redis |
+| `external` | `external` | 两个依赖都由服务器或其他平台提供 |
+
+例如，只部署 PostgreSQL，并连接服务器已有的 Redis：
+
+```dotenv
+SUB2API_POSTGRES_MODE=managed
+SUB2API_DATABASE_HOST=postgres
+
+SUB2API_REDIS_MODE=external
+SUB2API_REDIS_HOST=host.docker.internal
+SUB2API_REDIS_PORT=6379
+SUB2API_REDIS_PASSWORD=your-existing-redis-password
+SUB2API_REDIS_DB=0
+```
+
+例如，只部署 Redis，并连接外部 PostgreSQL：
+
+```dotenv
+SUB2API_POSTGRES_MODE=external
+SUB2API_DATABASE_HOST=host.docker.internal
+SUB2API_DATABASE_PORT=5432
+SUB2API_POSTGRES_USER=sub2api
+SUB2API_POSTGRES_PASSWORD=your-existing-postgres-password
+SUB2API_POSTGRES_DB=sub2api
+SUB2API_DATABASE_SSLMODE=disable
+
+SUB2API_REDIS_MODE=managed
+SUB2API_REDIS_HOST=redis
+```
+
+如果外部服务直接安装在同一台 Docker 宿主机上，使用 `host.docker.internal`，不要使用 `127.0.0.1` 或 `localhost`，因为容器中的 localhost 指向容器自己。远程数据库则直接填写内网 IP 或域名。当前官方 Sub2API 部署要求 PostgreSQL；MySQL 不能直接替代。
+
+If an external service runs directly on the Docker host, use `host.docker.internal`, not `127.0.0.1` or `localhost`, because localhost inside the container means the container itself. For a remote service, enter its private IP address or DNS name. The current official Sub2API deployment requires PostgreSQL; MySQL is not a drop-in replacement.
+
+For public API access, keep `SUB2API_BIND_HOST=127.0.0.1` and proxy an HTTPS domain to the selected local port with Nginx or Caddy. Set `0.0.0.0` only when direct port access is intentional and protected by a firewall.
+
+Minimal Nginx example (replace the domain and port with your real values):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name sub2api.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8321;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Update the complete stack with:
+
+```bash
+bash deploy.sh sub2api update
+```
+
+```powershell
+.\deploy.ps1 sub2api update
+```
+
+`sub2api uninstall` removes containers and the private network first. It asks separately before deleting the application and managed dependency volumes or `sub2api.env`, so normal uninstall does not silently delete data.
+
+The Compose contract follows the official Sub2API deployment: `AUTO_SETUP=true`, PostgreSQL, Redis, stable JWT/TOTP secrets, and the `/health` health check. The local integration uses named volumes instead of host directories for more consistent behavior across Docker Desktop and Linux.
 
 ### 管理面板 / Management Panel
 
@@ -671,14 +858,16 @@ After running, you can use `claude` directly in the terminal without manually se
 ## 🏗️ 项目结构 / Project Structure
 
 ```
-cli-proxy-manager/
+cli-proxy-deploy/
 ├── deploy.sh              # 主部署脚本 (Linux/macOS) / Main deployment script
 ├── deploy.ps1             # 主部署脚本 (Windows) / Main deployment script (Windows)
 ├── install.sh             # 远程安装脚本 (Linux/macOS) / Remote installer
 ├── install.ps1            # 远程安装脚本 (Windows) / Remote installer (Windows)
-├── docker-compose.yml     # Docker 编排 / Docker Compose
+├── docker-compose.yml     # 基础 Docker 编排 / Base Docker Compose
+├── docker-compose.sub2api.yml # 独立 Sub2API stack / Isolated Sub2API stack
 ├── config.example.yaml    # 配置模板 / Config template
 ├── .env.example           # 可选环境变量示例 / Optional env example
+├── sub2api.env.example    # Sub2API 非敏感模板 / Non-secret Sub2API template
 ├── .claude/settings.json  # Claude Code 共享配置 (ECC) / Shared Claude Code config
 ├── SECURITY.md            # 安全说明 / Security notes
 ├── LICENSE
@@ -915,8 +1104,9 @@ $env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
 
 ## 🔒 安全 / Security
 
-- `config.yaml` 和 `.env` 包含本地密钥，已被 `.gitignore` 忽略。
+- `config.yaml`、`.env` 和 `sub2api.env` 包含本地密钥，已被 `.gitignore` 忽略。
 - OAuth 凭证保存在 Docker volume `cli-proxy-manager-auth` 中；`backup` 生成的归档也包含敏感信息，不要上传到公开仓库。
+- Sub2API 数据保存在三个 `sub2api-manager-*` volumes 中。删除 volumes 前先确认已有备份。
 - 发布截图、日志、README 示例时，不要包含真实 API key、OAuth 邮箱或凭证文件名。
 
 See [SECURITY.md](SECURITY.md) for the full checklist.
@@ -930,6 +1120,7 @@ See [SECURITY.md](SECURITY.md) for the full checklist.
 - Run `bash -n deploy.sh` and `bash -n install.sh`.
 - Run `pwsh -NoProfile -Command "try { . .\deploy.ps1 } catch {}"` (syntax check).
 - Run `docker compose -f docker-compose.yml config --quiet`.
+- Run `docker compose --env-file sub2api.env.example -f docker-compose.sub2api.yml config --quiet`.
 - Run `bash deploy.sh status` / `.\deploy.ps1 status` and confirm the API test returns `200`.
 - Test a fresh clone path before announcing the repo.
 
@@ -938,6 +1129,7 @@ See [SECURITY.md](SECURITY.md) for the full checklist.
 ## 🤝 致谢 / Credits
 
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — 底层代理引擎 / The underlying proxy engine
+- [Sub2API](https://github.com/Wei-Shaw/sub2api) — 可选的订阅配额分发 API 网关 / Optional subscription-quota API gateway
 
 ---
 

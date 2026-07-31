@@ -4,13 +4,13 @@
 #  远程一键安装脚本 (Windows)
 #
 #  Usage / 用法:
-#    Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-manager/main/install.ps1 | Invoke-Expression
-#    $env:REPO_URL='https://github.com/MaykeZhs/cli-proxy-manager'; .\install.ps1
+#    Invoke-WebRequest -Uri https://raw.githubusercontent.com/MaykeZhs/cli-proxy-deploy/main/install.ps1 | Invoke-Expression
+#    $env:REPO_URL='https://github.com/MaykeZhs/cli-proxy-deploy'; .\install.ps1
 # =============================================================================
 
 $ErrorActionPreference = 'Stop'
 
-$REPO_URL    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/MaykeZhs/cli-proxy-manager' }
+$REPO_URL    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/MaykeZhs/cli-proxy-deploy' }
 $INSTALL_DIR = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:USERPROFILE '.cli-proxy-manager' }
 $BRANCH      = if ($env:BRANCH)      { $env:BRANCH }      else { 'main' }
 
