@@ -3261,13 +3261,13 @@ sub2api_compose() {
     local -a profiles=()
     [[ "${postgres_mode:-managed}" == "managed" ]] && profiles+=(--profile managed-postgres)
     [[ "${redis_mode:-managed}" == "managed" ]] && profiles+=(--profile managed-redis)
-    COMPOSE_PROJECT_NAME="${SUB2API_PROJECT_NAME}" docker compose \
+    docker compose -p "${SUB2API_PROJECT_NAME}" \
         --env-file "${SUB2API_ENV_FILE}" \
         -f "${SUB2API_COMPOSE_FILE}" "${profiles[@]}" "$@"
 }
 
 sub2api_compose_all() {
-    COMPOSE_PROJECT_NAME="${SUB2API_PROJECT_NAME}" docker compose \
+    docker compose -p "${SUB2API_PROJECT_NAME}" \
         --env-file "${SUB2API_ENV_FILE}" \
         -f "${SUB2API_COMPOSE_FILE}" \
         --profile managed-postgres --profile managed-redis "$@"
@@ -3750,7 +3750,7 @@ require_cursor_bridge_compose() {
 }
 
 cursor_bridge_compose() {
-    COMPOSE_PROJECT_NAME="${CURSOR_BRIDGE_PROJECT_NAME}" docker compose \
+    docker compose -p "${CURSOR_BRIDGE_PROJECT_NAME}" \
         -f "${CURSOR_BRIDGE_COMPOSE_FILE}" "$@"
 }
 
