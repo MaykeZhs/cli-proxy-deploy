@@ -56,6 +56,7 @@ $script:SUB2API_POSTGRES_CONTAINER_NAME = 'sub2api-manager-postgres'
 $script:SUB2API_REDIS_CONTAINER_NAME    = 'sub2api-manager-redis'
 $script:CURSOR_BRIDGE_COMPOSE_FILE     = Join-Path $script:SCRIPT_DIR 'docker-compose.cursor-bridge.yml'
 $script:CURSOR_BRIDGE_ENV_FILE         = Join-Path $script:SCRIPT_DIR 'cursor-bridge.env'
+$script:CURSOR_BRIDGE_USAGE_SCRIPT     = Join-Path $script:SCRIPT_DIR 'cursor-bridge/usage-readonly.js'
 $script:CURSOR_BRIDGE_ENV_EXAMPLE_FILE = Join-Path $script:SCRIPT_DIR 'cursor-bridge.env.example'
 $script:CURSOR_BRIDGE_PROJECT_NAME     = 'cursor-bridge'
 $script:CURSOR_BRIDGE_CONTAINER_NAME   = 'cursor-bridge'
@@ -3697,6 +3698,7 @@ function cmd-cursor-bridge-start {
     }
     info 'Cursor Bridge 已启动。CPA 直连 :8765，无主机端口'
     info 'CPA 面板不会自己拉模型。同步列表: .\deploy.ps1 cursor-bridge sync-models'
+    info '只读查套餐额度: .\deploy.ps1 cursor-bridge usage'
 }
 
 function cmd-cursor-bridge-stop {
@@ -3843,6 +3845,23 @@ function cmd-cursor-bridge-sync-models {
     try { cmd-restart } catch { warn 'CPA 重启失败，请稍后执行 .\deploy.ps1 restart' }
 }
 
+function cmd-cursor-bridge-usage {
+    Require-CursorBridgeCompose
+    Test-CursorBridgeEnvironment
+    $null = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'cursor-bridge 未运行，先 .\deploy.ps1 cursor-bridge' }
+    if (-not (Test-Path $script:CURSOR_BRIDGE_USAGE_SCRIPT -PathType Leaf)) {
+        throw "缺少 $($script:CURSOR_BRIDGE_USAGE_SCRIPT)"
+    }
+    info '只读查询 Cursor 套餐额度（不改账号、不打印 key）'
+    Get-Content -Raw $script:CURSOR_BRIDGE_USAGE_SCRIPT | docker exec -i $script:CURSOR_BRIDGE_CONTAINER_NAME node -
+    if ($LASTEXITCODE -eq 2) {
+        warn '这把 Dashboard key 查不了账单接口。请打开 https://cursor.com/dashboard'
+        return
+    }
+    if ($LASTEXITCODE -ne 0) { throw '只读额度查询失败' }
+}
+
 function cmd-cursor-bridge-uninstall {
     Require-CursorBridgeCompose
     $null = docker inspect $script:CONTAINER_NAME 2>$null
@@ -3874,6 +3893,7 @@ function show-cursor-bridge-help {
     Write-Host '    build      重新构建钉死镜像' -ForegroundColor Cyan
     Write-Host '    doctor     检查钉死、端口、挂网、401' -ForegroundColor Cyan
     Write-Host '    sync-models 从桥 /v1/models 写入 config.yaml（可跟 id 列表）' -ForegroundColor Cyan
+    Write-Host '    usage      只读查询 Cursor 套餐额度' -ForegroundColor Cyan
     Write-Host '    uninstall  拆桥；不删 CPA 卷' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  默认向导不会安装这座桥。执行 .\deploy.ps1 cursor-bridge，按提示粘贴一把 Cursor key。' -ForegroundColor DarkGray
@@ -3886,7 +3906,11 @@ function show-cursor-bridge-help {
     Write-Host '    脚本在桥容器里用已有 key 拉列表，只改 cursor-bridge 的 models:，然后重启 CPA。' -ForegroundColor DarkGray
     Write-Host '    auto 的别名仍是 cursor-auto；其它 id 原样当 alias。客户端继续用 CPA_API_KEY。' -ForegroundColor DarkGray
     Write-Host ''
-    Write-Host '  套餐额度：桥 HTTP 没有 /usage。chat 里的 usage 只是估算，不是 Cursor 账单。看额度请打开 cursor.com/dashboard。' -ForegroundColor DarkGray
+    Write-Host '  只读查套餐额度:'
+    Write-Host '    .\deploy.ps1 cursor-bridge usage'
+    Write-Host '    在桥容器里用已有 CURSOR_API_KEY 调 Cursor 账单接口。不改账号，不打印 key。' -ForegroundColor DarkGray
+    Write-Host '    若返回 401，这把 Dashboard key 查不了账单，请打开 cursor.com/dashboard。' -ForegroundColor DarkGray
+    Write-Host '    桥 HTTP 没有 /usage。chat 里的 usage 只是估算，不是 Cursor 账单。' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -3919,6 +3943,8 @@ function cmd-cursor-bridge {
             $only = if ($remaining.Count -gt 0) { $remaining[0] } else { '' }
             cmd-cursor-bridge-sync-models $only
         }
+        'usage' { cmd-cursor-bridge-usage }
+        'quota' { cmd-cursor-bridge-usage }
         'uninstall' { cmd-cursor-bridge-uninstall }
         'help' { show-cursor-bridge-help }
         '--help' { show-cursor-bridge-help }

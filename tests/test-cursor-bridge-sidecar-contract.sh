@@ -222,6 +222,16 @@ contains "$ROOT_DIR/deploy.ps1" 'Read-Host -AsSecureString' "deploy.ps1 must hid
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_configure' "deploy.sh must support cursor-bridge configure"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-configure' "deploy.ps1 must support cursor-bridge configure"
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_sync_models' "deploy.sh must support cursor-bridge sync-models"
+contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_usage' "deploy.sh must support cursor-bridge usage"
+contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-usage' "deploy.ps1 must support cursor-bridge usage"
+[[ -f "$ROOT_DIR/cursor-bridge/usage-readonly.js" ]] || fail "usage-readonly.js must exist"
+contains "$ROOT_DIR/cursor-bridge/usage-readonly.js" 'process.env.CURSOR_API_KEY' "usage probe must read the key from container env"
+if grep -Eq 'console\.log\(.*CURSOR_API_KEY' "$ROOT_DIR/cursor-bridge/usage-readonly.js"; then
+  fail "usage-readonly.js must not print CURSOR_API_KEY"
+fi
+if awk '/^cmd_cursor_bridge_usage\(\)/,/^maybe_start_cursor_bridge_sidecar\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'echo .*\$\{CURSOR_API_KEY\}|cat .*cursor-bridge.env'; then
+  fail "usage must not print keys"
+fi
 contains "$ROOT_DIR/deploy.sh" 'bash deploy.sh cursor-bridge sync-models' "deploy.sh help must teach sync-models"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-sync-models' "deploy.ps1 must support cursor-bridge sync-models"
 if awk '/^cmd_cursor_bridge_sync_models\(\)/,/^maybe_start_cursor_bridge_sidecar\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'echo .*CURSOR_|cat .*cursor-bridge.env'; then

@@ -492,6 +492,7 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | Cursor Bridge 日志 / Cursor Bridge logs | `bash deploy.sh cursor-bridge logs` | `.\deploy.ps1 cursor-bridge logs` |
 | Cursor Bridge 自检 / Cursor Bridge doctor | `bash deploy.sh cursor-bridge doctor` | `.\deploy.ps1 cursor-bridge doctor` |
 | Cursor Bridge 同步模型 / Sync Cursor models | `bash deploy.sh cursor-bridge sync-models` | `.\deploy.ps1 cursor-bridge sync-models` |
+| Cursor Bridge 只读额度 / Cursor plan usage | `bash deploy.sh cursor-bridge usage` | `.\deploy.ps1 cursor-bridge usage` |
 | Cursor Bridge 卸载 / Uninstall Cursor Bridge | `bash deploy.sh cursor-bridge uninstall` | `.\deploy.ps1 cursor-bridge uninstall` |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
