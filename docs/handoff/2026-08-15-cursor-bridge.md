@@ -98,7 +98,7 @@ Invoke-RestMethod http://127.0.0.1:18765/v1/models -Headers $h
 - 镜像 tag：`cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f`
 - 现网容器名：`cli-proxy-manager`（不要改）
 - 新网名：`cpa-cursor-bridge`
-- 守卫上游：`http://cursor-bridge-guard:8080/v1`
+- 上游：`http://cursor-bridge:8765/v1`（CPA 内网直连，无 nginx 守卫）
 
 Cursor key 从 https://cursor.com/dashboard/api 现开，弹窗里复制完整 `crsr_...`。
 

@@ -6,12 +6,11 @@
 客户端（现有 CPA API key）
   → 已有 cli-proxy-manager :8317
   → 私有网 cpa-cursor-bridge
-  → cursor-bridge-guard:8080
-  → cursor-bridge:8765（只在 cursor-bridge-backend 上）
+  → cursor-bridge:8765
   → 官方 Cursor（CURSOR_API_KEY × 1）
 ```
 
-CPA 只连 `cpa-cursor-bridge`，解析得到守卫，**解析不到** `cursor-bridge:8765`。
+CPA 和桥在同一张内网 `cpa-cursor-bridge` 上。桥没有主机端口，外网打不到 `:8765`。
 
 完整设计：[2026-08-15-cursor-bridge-cpa-sidecar-design.md](plans/2026-08-15-cursor-bridge-cpa-sidecar-design.md)。  
 本机 Stage A 试验：[../poc/cursor-bridge/README.md](../poc/cursor-bridge/README.md)（不要把 `poc/` 接到现网）。
@@ -33,7 +32,7 @@ CPA 只连 `cpa-cursor-bridge`，解析得到守卫，**解析不到** `cursor-b
 默认向导（不带参数的 `bash deploy.sh`）**不会**装这座桥。和 Sub2API 一样，用子命令。脚本会自动生成 `CURSOR_BRIDGE_API_KEY`，你只需要粘贴一把 Cursor Dashboard key：
 
 ```bash
-# 第一次：提示输入一把 Cursor key，然后构建镜像、起守卫、挂到现网 CPA
+# 第一次：提示输入一把 Cursor key，然后构建镜像、起桥、挂到现网 CPA
 bash deploy.sh cursor-bridge
 # Windows: .\deploy.ps1 cursor-bridge
 ```
@@ -42,7 +41,7 @@ bash deploy.sh cursor-bridge
 
 以后 `bash deploy.sh start` 也会在 env 已填好时顺带拉起桥并重新挂网。
 
-`start` 会：构建钉死镜像（没有才建）、起守卫、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时追加 `openai-compatibility`。第一次写入这段配置时，脚本会自己重启 CPA（几秒中断），不用再单独跑 `restart`。
+`start` 会：构建钉死镜像（没有才建）、起 `cursor-bridge`、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时把 `openai-compatibility` 指向 `http://cursor-bridge:8765/v1`。第一次写入或从旧守卫地址迁过时，脚本会自己重启 CPA（几秒中断）。
 
 更换 Cursor key（会重建桥容器，不动 CPA 卷）：
 
@@ -61,15 +60,14 @@ bash deploy.sh cursor-bridge
 bash deploy.sh cursor-bridge doctor
 ```
 
-### 5. 从 CPA 容器内打守卫（先不要改 config）
+### 5. 从 CPA 容器内打桥（先不要改 config）
 
 ```bash
-docker exec cli-proxy-manager wget -qS -O- http://cursor-bridge-guard:8080/v1/models \
-  || docker exec cli-proxy-manager curl -sS -D- -o /dev/null http://cursor-bridge-guard:8080/v1/models
+docker exec cli-proxy-manager wget -qS -O- http://cursor-bridge:8765/v1/models \
+  || docker exec cli-proxy-manager curl -sS -D- -o /dev/null http://cursor-bridge:8765/v1/models
 ```
 
-无 Bearer 应为 **401**。  
-这时 CPA 还解析不到 `cursor-bridge`（它不在 `cpa-cursor-bridge` 上）。
+无 Bearer 应为 **401**。
 
 ### 6. 追加 openai-compatibility，低峰重启 CPA
 
@@ -83,7 +81,7 @@ docker exec cli-proxy-manager wget -qS -O- http://cursor-bridge-guard:8080/v1/mo
 openai-compatibility:
   - name: cursor-bridge
     prefix: cursor
-    base-url: http://cursor-bridge-guard:8080/v1
+    base-url: http://cursor-bridge:8765/v1
     api-key-entries:
       - api-key: "<CURSOR_BRIDGE_API_KEY>"
     models:
@@ -132,7 +130,6 @@ curl -sSN -H "Authorization: Bearer <CPA_API_KEY>" \
 # 主机不能出现 0.0.0.0:8765 / 0.0.0.0:18765
 ss -lntup | grep -E '8765|18765' || true
 docker port cursor-bridge
-docker port cursor-bridge-guard
 
 # 现有 Claude / Gemini / Codex 仍可用（用原来的模型名打一条）
 docker inspect cli-proxy-manager --format '{{.Name}} {{json .HostConfig.Binds}} {{json .HostConfig.PortBindings}}'
@@ -171,7 +168,7 @@ bash deploy.sh cursor-bridge uninstall
 
 日志里不应出现 Authorization、`crsr_`、两把 key、或 prompt 正文。
 
-云上调试最多把守卫临时映到 `127.0.0.1`，不要映 `0.0.0.0`，不要映 `:8765`。默认 compose **不映射任何主机端口**。
+云上调试也不要把 `:8765` 映到 `0.0.0.0`。默认 compose **不映射任何主机端口**。
 
 ## 以后再说（第一版不要做）
 

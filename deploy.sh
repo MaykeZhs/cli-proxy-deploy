@@ -64,10 +64,8 @@ readonly SUB2API_REDIS_CONTAINER_NAME="sub2api-manager-redis"
 readonly CURSOR_BRIDGE_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.cursor-bridge.yml"
 readonly CURSOR_BRIDGE_ENV_FILE="${SCRIPT_DIR}/cursor-bridge.env"
 readonly CURSOR_BRIDGE_ENV_EXAMPLE_FILE="${SCRIPT_DIR}/cursor-bridge.env.example"
-readonly CURSOR_BRIDGE_GUARD_CONF="${SCRIPT_DIR}/cursor-bridge/nginx-guard.conf"
 readonly CURSOR_BRIDGE_PROJECT_NAME="cursor-bridge"
 readonly CURSOR_BRIDGE_CONTAINER_NAME="cursor-bridge"
-readonly CURSOR_BRIDGE_GUARD_CONTAINER_NAME="cursor-bridge-guard"
 readonly CURSOR_BRIDGE_NETWORK="cpa-cursor-bridge"
 readonly CURSOR_BRIDGE_SOURCE_REPOSITORY="https://github.com/anyrobert/cursor-api-proxy"
 readonly CURSOR_BRIDGE_SOURCE_COMMIT="c0ff1f941215027c0a8f658ca5d01f806559208f"
@@ -3746,7 +3744,6 @@ require_cursor_bridge_compose() {
         return 1
     fi
     assert_regular_file "${CURSOR_BRIDGE_COMPOSE_FILE}" || return 1
-    assert_regular_file "${CURSOR_BRIDGE_GUARD_CONF}" || return 1
 }
 
 cursor_bridge_compose() {
@@ -3923,11 +3920,24 @@ cursor_bridge_ensure_openai_compatibility() {
         return 0
     fi
     assert_regular_file "${CONFIG_FILE}" || return 1
+    local bridge_key tmp backup
+    if grep -Fq 'http://cursor-bridge-guard:8080/v1' "${CONFIG_FILE}"; then
+        backup="${SCRIPT_DIR}/config.yaml.bak.cursor-bridge"
+        if [[ ! -e "${backup}" ]]; then
+            cp "${CONFIG_FILE}" "${backup}"
+            chmod 600 "${backup}" 2>/dev/null || true
+        fi
+        tmp="$(umask 077; mktemp "${SCRIPT_DIR}/config.yaml.tmp.XXXXXX")" || return 1
+        sed 's|http://cursor-bridge-guard:8080/v1|http://cursor-bridge:8765/v1|g' "${CONFIG_FILE}" > "${tmp}"
+        mv "${tmp}" "${CONFIG_FILE}"
+        chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+        info "已把 cursor-bridge 上游改成直连 :8765"
+        return 2
+    fi
     if grep -Eq '^[[:space:]]*-[[:space:]]*name:[[:space:]]*cursor-bridge[[:space:]]*$' "${CONFIG_FILE}"; then
         info "config.yaml 已有 cursor-bridge"
         return 0
     fi
-    local bridge_key tmp backup
     bridge_key="$(cursor_bridge_env_value CURSOR_BRIDGE_API_KEY)"
     [[ "${bridge_key}" =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
     backup="${SCRIPT_DIR}/config.yaml.bak.cursor-bridge"
@@ -3939,9 +3949,9 @@ cursor_bridge_ensure_openai_compatibility() {
     {
         cat "${CONFIG_FILE}"
         if grep -Eq '^[[:space:]]*openai-compatibility:' "${CONFIG_FILE}"; then
-            printf '\n  - name: cursor-bridge\n    prefix: cursor\n    base-url: http://cursor-bridge-guard:8080/v1\n    api-key-entries:\n      - api-key: "%s"\n    models:\n      - name: auto\n        alias: cursor-auto\n' "${bridge_key}"
+            printf '\n  - name: cursor-bridge\n    prefix: cursor\n    base-url: http://cursor-bridge:8765/v1\n    api-key-entries:\n      - api-key: "%s"\n    models:\n      - name: auto\n        alias: cursor-auto\n' "${bridge_key}"
         else
-            printf '\nopenai-compatibility:\n  - name: cursor-bridge\n    prefix: cursor\n    base-url: http://cursor-bridge-guard:8080/v1\n    api-key-entries:\n      - api-key: "%s"\n    models:\n      - name: auto\n        alias: cursor-auto\n' "${bridge_key}"
+            printf '\nopenai-compatibility:\n  - name: cursor-bridge\n    prefix: cursor\n    base-url: http://cursor-bridge:8765/v1\n    api-key-entries:\n      - api-key: "%s"\n    models:\n      - name: auto\n        alias: cursor-auto\n' "${bridge_key}"
         fi
     } > "${tmp}"
     mv "${tmp}" "${CONFIG_FILE}"
@@ -3984,7 +3994,7 @@ cmd_cursor_bridge_configure() {
     prompt_cursor_api_key force || return 1
     ensure_cursor_bridge_ready || return 1
     if docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" >/dev/null 2>&1; then
-        cursor_bridge_compose up -d
+        cursor_bridge_compose up -d --remove-orphans
         cursor_bridge_connect_cpa || true
         info "已更换 Cursor key 并重建桥容器"
     else
@@ -3997,7 +4007,8 @@ cmd_cursor_bridge_start() {
     ensure_cursor_bridge_ready || return 1
     ensure_cursor_bridge_image || return 1
     cursor_bridge_compose config --quiet || { error "Cursor Bridge Compose 校验失败"; return 1; }
-    cursor_bridge_compose up -d
+    cursor_bridge_compose up -d --remove-orphans
+    docker network rm cursor-bridge-backend >/dev/null 2>&1 || true
     cursor_bridge_connect_cpa || true
     local compat_status=0
     cursor_bridge_ensure_openai_compatibility || compat_status=$?
@@ -4007,7 +4018,7 @@ cmd_cursor_bridge_start() {
     elif [[ "${compat_status}" -ne 0 ]]; then
         warn "写入 openai-compatibility 失败。可检查 config.yaml 后执行 bash deploy.sh restart"
     fi
-    info "Cursor Bridge 已启动。CPA 走守卫 :8080，桥本身无主机端口"
+    info "Cursor Bridge 已启动。CPA 直连 :8765，无主机端口"
 }
 
 cmd_cursor_bridge_stop() {
@@ -4053,20 +4064,20 @@ cmd_cursor_bridge_doctor() {
     local user ports logs cursor_key bridge_key code
     user="$(docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" --format '{{.Config.User}}' 2>/dev/null || true)"
     [[ "${user}" == "app" ]] || { error "cursor-bridge 必须以 user=app 运行"; return 1; }
-    ports="$(docker port "${CURSOR_BRIDGE_CONTAINER_NAME}" 2>/dev/null || true)$(docker port "${CURSOR_BRIDGE_GUARD_CONTAINER_NAME}" 2>/dev/null || true)"
+    ports="$(docker port "${CURSOR_BRIDGE_CONTAINER_NAME}" 2>/dev/null || true)"
     printf '%s' "${ports}" | grep -Fq '0.0.0.0:' && { error "桥端口绑到了 0.0.0.0"; return 1; }
     if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
         docker inspect "${CONTAINER_NAME}" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null | grep -Fq "${CURSOR_BRIDGE_NETWORK}" \
             || { error "CPA 未挂 ${CURSOR_BRIDGE_NETWORK}"; return 1; }
-        code="$(docker exec "${CONTAINER_NAME}" wget -qS -O /dev/null "http://cursor-bridge-guard:8080/v1/models" 2>&1 | awk '/HTTP\//{print $2}' | tail -1 || true)"
+        code="$(docker exec "${CONTAINER_NAME}" wget -qS -O /dev/null "http://cursor-bridge:8765/v1/models" 2>&1 | awk '/HTTP\//{print $2}' | tail -1 || true)"
         if [[ -z "${code}" ]]; then
-            code="$(docker exec "${CONTAINER_NAME}" curl -sS -o /dev/null -w '%{http_code}' "http://cursor-bridge-guard:8080/v1/models" 2>/dev/null || true)"
+            code="$(docker exec "${CONTAINER_NAME}" curl -sS -o /dev/null -w '%{http_code}' "http://cursor-bridge:8765/v1/models" 2>/dev/null || true)"
         fi
-        [[ "${code}" == "401" ]] || warn "无 Bearer 打守卫应为 401，实际 ${code:-unknown}"
+        [[ "${code}" == "401" ]] || warn "无 Bearer 打桥应为 401，实际 ${code:-unknown}"
     fi
     cursor_key="$(cursor_bridge_env_value CURSOR_API_KEY)"
     bridge_key="$(cursor_bridge_env_value CURSOR_BRIDGE_API_KEY)"
-    logs="$(docker logs "${CURSOR_BRIDGE_CONTAINER_NAME}" 2>&1 || true)\n$(docker logs "${CURSOR_BRIDGE_GUARD_CONTAINER_NAME}" 2>&1 || true)"
+    logs="$(docker logs "${CURSOR_BRIDGE_CONTAINER_NAME}" 2>&1 || true)"
     if [[ -n "${cursor_key}" && "${logs}" == *"${cursor_key}"* ]] || [[ -n "${bridge_key}" && "${logs}" == *"${bridge_key}"* ]]; then
         error "日志里出现了 key"
         return 1

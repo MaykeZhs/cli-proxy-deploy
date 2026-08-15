@@ -51,12 +51,10 @@ Boundary:
 
 - Clients keep using the existing CPA API key. They never send `CURSOR_API_KEY`
   or `crsr_` to CPA.
-- CPA talks only to `cursor-bridge-guard:8080` on `cpa-cursor-bridge`. It must
-  not join `cursor-bridge-backend` and must not reach `:8765`.
-- The guard allows `GET /v1/models` and `POST /v1/chat/completions` only, caps
-  the body at 8 MiB, and allows one in-flight proxied connection.
-- The bridge and guard publish no host ports. Do not bind `0.0.0.0:8765` or
-  `0.0.0.0:18765`, and do not put the live Nginx in front of either port.
+- CPA talks to `cursor-bridge:8765` on `cpa-cursor-bridge`. The bridge has no
+  host port, so the public net cannot reach `:8765`.
+- Do not bind `0.0.0.0:8765` or `0.0.0.0:18765`, and do not put the live Nginx
+  in front of the bridge.
 - Keep `cursor-bridge.env` mode `0600`. Use different values for
   `CURSOR_API_KEY` and `CURSOR_BRIDGE_API_KEY`. Never reuse `CPA_API_KEY` or
   `CPA_MANAGEMENT_KEY`.

@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Cursor Bridge v1 sidecar static contract.
+# Cursor Bridge sidecar static contract: CPA talks to cursor-bridge:8765.
 # Bash 3.2 compatible.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$ROOT_DIR/docker-compose.cursor-bridge.yml"
 ENV_EXAMPLE="$ROOT_DIR/cursor-bridge.env.example"
-GUARD_CONF="$ROOT_DIR/cursor-bridge/nginx-guard.conf"
 GITIGNORE="$ROOT_DIR/.gitignore"
 SECURITY="$ROOT_DIR/SECURITY.md"
 SOURCE_COMMIT="c0ff1f941215027c0a8f658ca5d01f806559208f"
 SOURCE_REPOSITORY="https://github.com/anyrobert/cursor-api-proxy"
 EXPECTED_IMAGE="cursor-api-proxy:poc-$SOURCE_COMMIT"
-EXPECTED_GUARD_IMAGE="nginx:1.28.0-alpine"
 PROJECT_NAME="cursor-bridge"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -29,23 +27,21 @@ require_python() {
 
 for rel in \
   docker-compose.cursor-bridge.yml \
-  cursor-bridge/nginx-guard.conf \
   cursor-bridge.env.example \
   docs/cursor-bridge.md
 do
   [ -f "$ROOT_DIR/$rel" ] || fail "Missing required sidecar file: $rel"
 done
+[ -e "$ROOT_DIR/cursor-bridge/nginx-guard.conf" ] && fail "nginx-guard.conf must be removed for direct CPA to :8765"
 
 contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 not_contains() { ! grep -Fq -- "$2" "$1" || fail "$3"; }
 strip_cr() { tr -d '\r' < "$1"; }
 
-# --- Source-level pins ---
 image_lines="$(strip_cr "$COMPOSE_FILE" | grep -E '^[[:space:]]*image:[[:space:]]*' || true)"
 printf '%s\n' "$image_lines" | grep -Fq "$EXPECTED_IMAGE" || fail "Compose must pin $EXPECTED_IMAGE"
-printf '%s\n' "$image_lines" | grep -Fq "$EXPECTED_GUARD_IMAGE" || fail "Guard image must be $EXPECTED_GUARD_IMAGE"
 image_count="$(printf '%s\n' "$image_lines" | grep -c . || true)"
-[ "$image_count" -eq 2 ] || fail "Compose must define exactly two image: lines"
+[ "$image_count" -eq 1 ] || fail "Compose must define exactly one image: line"
 
 bridge_image_line="$(printf '%s\n' "$image_lines" | grep -F "$EXPECTED_IMAGE" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
 [ "$bridge_image_line" = "image: $EXPECTED_IMAGE" ] || fail "Bridge image must be hard-coded as $EXPECTED_IMAGE"
@@ -63,10 +59,12 @@ not_contains "$COMPOSE_FILE" 'CURSOR_CONFIG_DIRS' "Compose must not set CURSOR_C
 not_contains "$COMPOSE_FILE" 'CURSOR_ACCOUNT_DIRS' "Compose must not set CURSOR_ACCOUNT_DIRS"
 not_contains "$COMPOSE_FILE" 'internal: true' "Networks must not be internal: true"
 not_contains "$COMPOSE_FILE" 'internal:true' "Networks must not be internal:true"
+not_contains "$COMPOSE_FILE" 'cursor-bridge-guard' "Compose must not define a guard service"
+not_contains "$COMPOSE_FILE" 'cursor-bridge-backend' "Compose must not keep the old backend-only network"
+not_contains "$COMPOSE_FILE" 'nginx' "Compose must not use nginx"
 contains "$COMPOSE_FILE" 'pull_policy: never' "Bridge must set pull_policy: never"
 contains "$COMPOSE_FILE" 'user: app' "Bridge must run as user app"
 contains "$COMPOSE_FILE" 'name: cpa-cursor-bridge' "Must create named network cpa-cursor-bridge"
-contains "$COMPOSE_FILE" 'name: cursor-bridge-backend' "Must create named network cursor-bridge-backend"
 contains "$COMPOSE_FILE" "$SOURCE_COMMIT" "Compose must record the pinned commit"
 contains "$COMPOSE_FILE" "$SOURCE_REPOSITORY" "Compose must record the upstream repository"
 
@@ -83,38 +81,17 @@ not_contains "$ENV_EXAMPLE" 'latest' "Environment example must not use a latest 
 not_contains "$ENV_EXAMPLE" 'CURSOR_BRIDGE_POC_IMAGE' "Environment example must not define CURSOR_BRIDGE_POC_IMAGE"
 not_contains "$ENV_EXAMPLE" 'CPA_API_KEY=' "Environment example must not set CPA_API_KEY"
 
-if grep -Eq '^[[:space:]]*daemon[[:space:]]+' "$GUARD_CONF"; then
-  fail "Guard must not set daemon; the official image already passes -g daemon off"
-fi
-contains "$GUARD_CONF" 'client_max_body_size 8m' "Guard must cap body at 8m"
-contains "$GUARD_CONF" 'limit_conn cursor_bridge 1' "Guard must limit to 1 concurrent proxied connection"
-contains "$GUARD_CONF" 'proxy_read_timeout 300s' "Guard timeout must be at least 300s"
-contains "$GUARD_CONF" 'location = /v1/models' "Guard must allow /v1/models"
-contains "$GUARD_CONF" 'location = /v1/chat/completions' "Guard must allow /v1/chat/completions"
-contains "$GUARD_CONF" 'proxy_set_header X-Cursor-Mode "";' "Guard must strip X-Cursor-Mode"
-contains "$GUARD_CONF" 'proxy_set_header X-Cursor-Workspace "";' "Guard must strip X-Cursor-Workspace"
-contains "$GUARD_CONF" 'proxy_buffering off' "Guard must not buffer streaming responses"
-not_contains "$GUARD_CONF" '/v1/responses' "Guard must not proxy /v1/responses"
-not_contains "$GUARD_CONF" '/v1/messages' "Guard must not proxy /v1/messages"
-not_contains "$GUARD_CONF" '/healthz' "Guard must not expose bridge /healthz"
-
-log_format_line="$(grep -E 'log_format[[:space:]]+guard_safe' "$GUARD_CONF" || true)"
-printf '%s\n' "$log_format_line" | grep -Fq '$http_authorization' && fail "Guard log_format must not include \$http_authorization"
-printf '%s\n' "$log_format_line" | grep -Fq '$request_body' && fail "Guard log_format must not include \$request_body"
-printf '%s\n' "$log_format_line" | grep -Fq '$http_cookie' && fail "Guard log_format must not include \$http_cookie"
-
 contains "$GITIGNORE" 'cursor-bridge.env' ".gitignore must ignore cursor-bridge.env"
 contains "$SECURITY" 'cursor-bridge.env' "SECURITY.md must mention cursor-bridge.env"
-contains "$SECURITY" 'cursor-bridge-guard' "SECURITY.md must describe the guard boundary"
+contains "$SECURITY" 'cursor-bridge:8765' "SECURITY.md must describe the direct CPA to :8765 path"
+not_contains "$SECURITY" 'cursor-bridge-guard' "SECURITY.md must not require the removed guard"
 
 require_python
 docker compose version >/dev/null 2>&1 || fail "docker compose is required to validate the sidecar stack"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-mkdir -p "$TMP_DIR/cursor-bridge"
 cp "$COMPOSE_FILE" "$TMP_DIR/docker-compose.cursor-bridge.yml"
-cp "$GUARD_CONF" "$TMP_DIR/cursor-bridge/nginx-guard.conf"
 cp "$ENV_EXAMPLE" "$TMP_DIR/cursor-bridge.env"
 
 COMPOSE_JSON="$(
@@ -124,14 +101,12 @@ COMPOSE_JSON="$(
 )" || fail "docker compose config --format json failed"
 
 export COMPOSE_CONTRACT_IMAGE="$EXPECTED_IMAGE"
-export COMPOSE_CONTRACT_GUARD_IMAGE="$EXPECTED_GUARD_IMAGE"
 export COMPOSE_CONTRACT_PROJECT="$PROJECT_NAME"
 printf '%s' "$COMPOSE_JSON" | "$PYTHON" -c '
 import json, os, sys
 
 cfg = json.load(sys.stdin)
 expected_image = os.environ["COMPOSE_CONTRACT_IMAGE"]
-expected_guard = os.environ["COMPOSE_CONTRACT_GUARD_IMAGE"]
 expected_project = os.environ["COMPOSE_CONTRACT_PROJECT"]
 
 def fail(message):
@@ -143,11 +118,10 @@ if cfg.get("name") != expected_project:
 
 services = cfg.get("services") or {}
 names = sorted(services.keys())
-if names != ["cursor-bridge", "cursor-bridge-guard"]:
-    fail("Compose must define exactly cursor-bridge and cursor-bridge-guard, got %s" % names)
+if names != ["cursor-bridge"]:
+    fail("Compose must define exactly cursor-bridge, got %s" % names)
 
 bridge = services["cursor-bridge"]
-guard = services["cursor-bridge-guard"]
 
 if bridge.get("image") != expected_image:
     fail("Effective bridge image must be %s" % expected_image)
@@ -157,13 +131,11 @@ if bridge.get("pull_policy") != "never":
     fail("pull_policy must be never")
 if bridge.get("ports"):
     fail("cursor-bridge must not publish host ports")
-if guard.get("ports"):
-    fail("cursor-bridge-guard must not publish host ports")
 if bridge.get("expose"):
     fail("cursor-bridge must not declare expose")
-if bridge.get("privileged") is True or guard.get("privileged") is True:
+if bridge.get("privileged") is True:
     fail("privileged must not be enabled")
-if bridge.get("network_mode") == "host" or guard.get("network_mode") == "host":
+if bridge.get("network_mode") == "host":
     fail("network_mode must not be host")
 
 for key in ("volumes", "volumes_from", "devices", "configs", "secrets"):
@@ -173,8 +145,6 @@ for key in ("volumes", "volumes_from", "devices", "configs", "secrets"):
 
 if list(bridge.get("cap_drop") or []) != ["ALL"]:
     fail("bridge cap_drop must be ALL")
-if list(guard.get("cap_drop") or []) != ["ALL"]:
-    fail("guard cap_drop must be ALL")
 if "no-new-privileges:true" not in list(bridge.get("security_opt") or []):
     fail("bridge security_opt must include no-new-privileges:true")
 if bridge.get("pids_limit") != 128:
@@ -187,11 +157,6 @@ if bridge.get("init") is not True:
     fail("bridge init must be true")
 if str(bridge.get("user") or "") != "app":
     fail("bridge user must be app")
-
-if guard.get("image") != expected_guard:
-    fail("Effective guard image must be %s" % expected_guard)
-if guard.get("build"):
-    fail("Guard must not declare a build section")
 
 env = bridge.get("environment")
 if not isinstance(env, dict):
@@ -218,22 +183,18 @@ for key in ("CURSOR_CONFIG_DIRS", "CURSOR_ACCOUNT_DIRS"):
 
 networks = cfg.get("networks") or {}
 cpa_net = None
-backend_net = None
 for net in networks.values():
     name = net.get("name") or ""
     if name == "cpa-cursor-bridge":
         cpa_net = net
     if name == "cursor-bridge-backend":
-        backend_net = net
+        fail("cursor-bridge-backend must be removed")
 if cpa_net is None:
     fail("named network cpa-cursor-bridge is required")
-if backend_net is None:
-    fail("named network cursor-bridge-backend is required")
-if cpa_net.get("internal") is True or backend_net.get("internal") is True:
-    fail("sidecar networks must not be internal")
+if cpa_net.get("internal") is True:
+    fail("sidecar network must not be internal")
 
 bridge_nets = set((bridge.get("networks") or {}).keys()) if isinstance(bridge.get("networks"), dict) else set(bridge.get("networks") or [])
-guard_nets = set((guard.get("networks") or {}).keys()) if isinstance(guard.get("networks"), dict) else set(guard.get("networks") or [])
 
 def net_names(svc_nets, cfg_nets):
     out = set()
@@ -243,21 +204,16 @@ def net_names(svc_nets, cfg_nets):
     return out
 
 bridge_net_names = net_names(bridge_nets, networks)
-guard_net_names = net_names(guard_nets, networks)
-if "cpa-cursor-bridge" in bridge_net_names:
-    fail("cursor-bridge must not join cpa-cursor-bridge (CPA would reach :8765)")
-if "cursor-bridge-backend" not in bridge_net_names:
-    fail("cursor-bridge must join cursor-bridge-backend")
-if "cpa-cursor-bridge" not in guard_net_names:
-    fail("guard must join cpa-cursor-bridge")
-if "cursor-bridge-backend" not in guard_net_names:
-    fail("guard must join cursor-bridge-backend")
+if "cpa-cursor-bridge" not in bridge_net_names:
+    fail("cursor-bridge must join cpa-cursor-bridge so CPA can reach :8765")
 '
 
 contains "$ROOT_DIR/deploy.sh" 'docker compose -p "${CURSOR_BRIDGE_PROJECT_NAME}"' "deploy.sh must set the Compose project with -p"
 if awk '/^cursor_bridge_compose\(\)/,/^cursor_bridge_env_value\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'COMPOSE_PROJECT_NAME='; then
   fail "cursor_bridge_compose must not assign readonly COMPOSE_PROJECT_NAME"
 fi
+contains "$ROOT_DIR/deploy.sh" 'http://cursor-bridge:8765/v1' "deploy.sh must point CPA at cursor-bridge:8765"
+contains "$ROOT_DIR/deploy.ps1" 'http://cursor-bridge:8765/v1' "deploy.ps1 must point CPA at cursor-bridge:8765"
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge' "deploy.sh must dispatch cursor-bridge"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge' "deploy.ps1 must dispatch cursor-bridge"
 contains "$ROOT_DIR/deploy.sh" 'prompt_cursor_api_key' "deploy.sh must prompt for the Cursor key"

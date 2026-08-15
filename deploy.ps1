@@ -57,10 +57,8 @@ $script:SUB2API_REDIS_CONTAINER_NAME    = 'sub2api-manager-redis'
 $script:CURSOR_BRIDGE_COMPOSE_FILE     = Join-Path $script:SCRIPT_DIR 'docker-compose.cursor-bridge.yml'
 $script:CURSOR_BRIDGE_ENV_FILE         = Join-Path $script:SCRIPT_DIR 'cursor-bridge.env'
 $script:CURSOR_BRIDGE_ENV_EXAMPLE_FILE = Join-Path $script:SCRIPT_DIR 'cursor-bridge.env.example'
-$script:CURSOR_BRIDGE_GUARD_CONF       = Join-Path $script:SCRIPT_DIR 'cursor-bridge/nginx-guard.conf'
 $script:CURSOR_BRIDGE_PROJECT_NAME     = 'cursor-bridge'
 $script:CURSOR_BRIDGE_CONTAINER_NAME   = 'cursor-bridge'
-$script:CURSOR_BRIDGE_GUARD_CONTAINER_NAME = 'cursor-bridge-guard'
 $script:CURSOR_BRIDGE_NETWORK          = 'cpa-cursor-bridge'
 $script:CURSOR_BRIDGE_SOURCE_REPOSITORY = 'https://github.com/anyrobert/cursor-api-proxy'
 $script:CURSOR_BRIDGE_SOURCE_COMMIT    = 'c0ff1f941215027c0a8f658ca5d01f806559208f'
@@ -3420,7 +3418,6 @@ function Require-CursorBridgeCompose {
     if ($LASTEXITCODE -ne 0) { throw 'Cursor Bridge 要求 Docker Compose v2' }
     $script:COMPOSE_CMD = 'docker compose'
     Assert-RegularFile $script:CURSOR_BRIDGE_COMPOSE_FILE
-    Assert-RegularFile $script:CURSOR_BRIDGE_GUARD_CONF
 }
 
 function Invoke-CursorBridgeCompose {
@@ -3596,6 +3593,18 @@ function Ensure-CursorBridgeOpenaiCompatibility {
     }
     Assert-RegularFile $script:CONFIG_FILE
     $config = Get-Content $script:CONFIG_FILE -Raw
+    if ($config -like '*http://cursor-bridge-guard:8080/v1*') {
+        $backup = Join-Path $script:SCRIPT_DIR 'config.yaml.bak.cursor-bridge'
+        if (-not (Test-Path $backup)) {
+            Copy-Item $script:CONFIG_FILE $backup
+            Set-CursorBridgeEnvPermissions $backup
+        }
+        $updated = $config.Replace('http://cursor-bridge-guard:8080/v1', 'http://cursor-bridge:8765/v1')
+        Set-Content -Path $script:CONFIG_FILE -Value $updated.TrimEnd() -Encoding utf8
+        Set-CursorBridgeEnvPermissions $script:CONFIG_FILE
+        info '已把 cursor-bridge 上游改成直连 :8765'
+        return $true
+    }
     if ($config -match '(?m)^\s*-\s*name:\s*cursor-bridge\s*$') {
         info 'config.yaml 已有 cursor-bridge'
         return $false
@@ -3611,7 +3620,7 @@ function Ensure-CursorBridgeOpenaiCompatibility {
 
   - name: cursor-bridge
     prefix: cursor
-    base-url: http://cursor-bridge-guard:8080/v1
+    base-url: http://cursor-bridge:8765/v1
     api-key-entries:
       - api-key: "$bridgeKey"
     models:
@@ -3665,7 +3674,7 @@ function cmd-cursor-bridge-configure {
     Ensure-CursorBridgeReady
     $null = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Invoke-CursorBridgeCompose up -d
+        Invoke-CursorBridgeCompose up -d --remove-orphans
         Connect-CursorBridgeCpa
         info '已更换 Cursor key 并重建桥容器'
     } else {
@@ -3678,14 +3687,15 @@ function cmd-cursor-bridge-start {
     Ensure-CursorBridgeReady
     Ensure-CursorBridgeImage
     Invoke-CursorBridgeCompose config --quiet
-    Invoke-CursorBridgeCompose up -d
+    Invoke-CursorBridgeCompose up -d --remove-orphans
+    $null = docker network rm cursor-bridge-backend 2>$null
     Connect-CursorBridgeCpa
     $appended = Ensure-CursorBridgeOpenaiCompatibility
     if ($appended) {
         info '正在重启 CPA，让它读到 Cursor 上游（约几秒）'
         try { cmd-restart } catch { warn 'CPA 重启失败，请稍后执行 .\deploy.ps1 restart' }
     }
-    info 'Cursor Bridge 已启动。CPA 走守卫 :8080，桥本身无主机端口'
+    info 'Cursor Bridge 已启动。CPA 直连 :8765，无主机端口'
 }
 
 function cmd-cursor-bridge-stop {
@@ -3730,7 +3740,7 @@ function cmd-cursor-bridge-doctor {
     if ($LASTEXITCODE -ne 0) { throw "缺少钉死镜像 $($script:CURSOR_BRIDGE_IMAGE)" }
     $user = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME --format '{{.Config.User}}' 2>$null
     if ($user -ne 'app') { throw 'cursor-bridge 必须以 user=app 运行' }
-    $ports = "$(docker port $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null)$(docker port $script:CURSOR_BRIDGE_GUARD_CONTAINER_NAME 2>$null)"
+    $ports = "$(docker port $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null)"
     if ($ports -like '*0.0.0.0:*') { throw '桥端口绑到了 0.0.0.0' }
     $null = docker inspect $script:CONTAINER_NAME 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -3741,7 +3751,7 @@ function cmd-cursor-bridge-doctor {
     }
     $cursorKey = Get-CursorBridgeEnvValue 'CURSOR_API_KEY'
     $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
-    $logs = "$(docker logs $script:CURSOR_BRIDGE_CONTAINER_NAME 2>&1)`n$(docker logs $script:CURSOR_BRIDGE_GUARD_CONTAINER_NAME 2>&1)"
+    $logs = "$(docker logs $script:CURSOR_BRIDGE_CONTAINER_NAME 2>&1)"
     if (($cursorKey -and $logs.Contains($cursorKey)) -or ($bridgeKey -and $logs.Contains($bridgeKey))) {
         throw '日志里出现了 key'
     }

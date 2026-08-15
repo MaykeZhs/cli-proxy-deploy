@@ -37,7 +37,7 @@
 
 实验性 Cursor → API 本地 POC（仅 loopback，不接线上 CPA）：[`poc/cursor-bridge/README.md`](poc/cursor-bridge/README.md)。
 
-可选云端 Cursor Bridge sidecar（不改现网 CPA 容器，经守卫接入）：[`docs/cursor-bridge.md`](docs/cursor-bridge.md)。
+可选云端 Cursor Bridge sidecar（不改现网 CPA 容器，内网直连 `:8765`）：[`docs/cursor-bridge.md`](docs/cursor-bridge.md)。
 
 ---
 
@@ -880,7 +880,6 @@ cli-proxy-deploy/
 ├── docker-compose.sub2api.yml # 独立 Sub2API stack / Isolated Sub2API stack
 ├── docker-compose.cursor-bridge.yml # 可选 Cursor Bridge sidecar / Optional Cursor Bridge sidecar
 ├── cursor-bridge.env.example # Cursor Bridge 非敏感模板 / Non-secret Cursor Bridge template
-├── cursor-bridge/         # 守卫配置 / Guard config
 ├── config.example.yaml    # 配置模板 / Config template
 ├── .env.example           # 可选环境变量示例 / Optional env example
 ├── sub2api.env.example    # Sub2API 非敏感模板 / Non-secret Sub2API template
