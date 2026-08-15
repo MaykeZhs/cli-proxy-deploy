@@ -39,3 +39,17 @@ first deployment. If you change `SUB2API_BIND_HOST=0.0.0.0`, protect the selecte
 port with a firewall and an HTTPS reverse proxy. Managed PostgreSQL and Redis are
 intentionally not published to the host. Keep external database and Redis
 credentials private in `sub2api.env`.
+
+## Experimental Cursor Bridge POC
+
+The Cursor Bridge POC is internal and disposable. It binds only to loopback and
+must not be connected to Nginx, the live CPA container, CPAMP, Sub2API, a public
+hostname, or a host workspace. Keep `poc/cursor-bridge/poc.env` mode `0600` and
+use different values for `CURSOR_API_KEY` and `CURSOR_BRIDGE_API_KEY`.
+
+The audited upstream commit processes dashboard/control routes before bridge-key
+authentication and reads request bodies without an application size limit.
+Loopback-only exposure and sequential operator tests are mandatory. Public,
+shared, paid, multi-account, quota-avoidance, `reset-hwid`, agent, plan, MCP,
+force, real-workspace, and billing uses are outside this POC and are production
+STOP conditions.

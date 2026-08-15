@@ -1,0 +1,58 @@
+name: cursor-bridge-poc
+
+services:
+  cursor-bridge:
+    image: cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f
+    pull_policy: never
+    container_name: cursor-bridge-poc
+    user: app
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${CURSOR_BRIDGE_POC_PORT:-18765}:8765"
+    environment:
+      CURSOR_API_KEY: ${CURSOR_API_KEY}
+      CURSOR_BRIDGE_API_KEY: ${CURSOR_BRIDGE_API_KEY}
+      CURSOR_BRIDGE_HOST: ${CURSOR_BRIDGE_HOST}
+      CURSOR_BRIDGE_PORT: ${CURSOR_BRIDGE_PORT}
+      CURSOR_BRIDGE_DEFAULT_MODEL: ${CURSOR_BRIDGE_DEFAULT_MODEL}
+      CURSOR_BRIDGE_TIMEOUT_MS: ${CURSOR_BRIDGE_TIMEOUT_MS}
+      CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE: ${CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE}
+      CURSOR_BRIDGE_MODE: ${CURSOR_BRIDGE_MODE}
+      CURSOR_BRIDGE_FORCE: ${CURSOR_BRIDGE_FORCE}
+      CURSOR_BRIDGE_APPROVE_MCPS: ${CURSOR_BRIDGE_APPROVE_MCPS}
+      CURSOR_BRIDGE_STRICT_MODEL: ${CURSOR_BRIDGE_STRICT_MODEL}
+      CURSOR_BRIDGE_VERBOSE: ${CURSOR_BRIDGE_VERBOSE}
+      CURSOR_BRIDGE_MAX_MODE: ${CURSOR_BRIDGE_MAX_MODE}
+      CURSOR_BRIDGE_USE_ACP: ${CURSOR_BRIDGE_USE_ACP}
+      CURSOR_BRIDGE_PROMPT_VIA_STDIN: ${CURSOR_BRIDGE_PROMPT_VIA_STDIN}
+      CURSOR_BRIDGE_ACP_RAW_DEBUG: ${CURSOR_BRIDGE_ACP_RAW_DEBUG}
+      CURSOR_BRIDGE_CONTEXT_PREAMBLE: ${CURSOR_BRIDGE_CONTEXT_PREAMBLE}
+      CURSOR_BRIDGE_MULTI_PORT: ${CURSOR_BRIDGE_MULTI_PORT}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 2g
+    mem_reservation: 512m
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - cursor-bridge-poc-network
+
+networks:
+  cursor-bridge-poc-network:
+    name: cursor-bridge-poc-network
+    driver: bridge
