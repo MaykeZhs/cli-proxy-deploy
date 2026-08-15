@@ -36,6 +36,7 @@ docker compose -f docker-compose.yml config --quiet
 | Update image | `bash deploy.sh update` | `.\deploy.ps1 update` |
 | Uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
+| Cursor Bridge deploy | `bash deploy.sh cursor-bridge` | `.\deploy.ps1 cursor-bridge` |
 
 Custom port: `CPA_PORT=9000 bash deploy.sh start` / `$env:CPA_PORT=9000; .\deploy.ps1 start`
 

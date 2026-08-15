@@ -26,6 +26,7 @@
 #          bash deploy.sh uninstall # 完全卸载
 #          bash deploy.sh setup-claude # 配置 Claude Code
 #          bash deploy.sh sub2api deploy # 一键部署 Sub2API
+#          bash deploy.sh cursor-bridge start # 启动可选 Cursor Bridge sidecar
 #
 # =============================================================================
 
@@ -60,6 +61,17 @@ readonly SUB2API_PROJECT_NAME="sub2api-manager"
 readonly SUB2API_CONTAINER_NAME="sub2api-manager"
 readonly SUB2API_POSTGRES_CONTAINER_NAME="sub2api-manager-postgres"
 readonly SUB2API_REDIS_CONTAINER_NAME="sub2api-manager-redis"
+readonly CURSOR_BRIDGE_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.cursor-bridge.yml"
+readonly CURSOR_BRIDGE_ENV_FILE="${SCRIPT_DIR}/cursor-bridge.env"
+readonly CURSOR_BRIDGE_ENV_EXAMPLE_FILE="${SCRIPT_DIR}/cursor-bridge.env.example"
+readonly CURSOR_BRIDGE_GUARD_CONF="${SCRIPT_DIR}/cursor-bridge/nginx-guard.conf"
+readonly CURSOR_BRIDGE_PROJECT_NAME="cursor-bridge"
+readonly CURSOR_BRIDGE_CONTAINER_NAME="cursor-bridge"
+readonly CURSOR_BRIDGE_GUARD_CONTAINER_NAME="cursor-bridge-guard"
+readonly CURSOR_BRIDGE_NETWORK="cpa-cursor-bridge"
+readonly CURSOR_BRIDGE_SOURCE_REPOSITORY="https://github.com/anyrobert/cursor-api-proxy"
+readonly CURSOR_BRIDGE_SOURCE_COMMIT="c0ff1f941215027c0a8f658ca5d01f806559208f"
+readonly CURSOR_BRIDGE_IMAGE="cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f"
 readonly AUTO_UPDATE_LOG="${SCRIPT_DIR}/logs/auto-update.log"
 readonly FAILED_UPDATE_FILE="${SCRIPT_DIR}/logs/failed-update-digest"
 readonly AUTO_UPDATE_MARKER_BEGIN="# >>> cli-proxy-manager auto-update >>>"
@@ -2382,6 +2394,7 @@ cmd_deploy() {
         if [[ "${config_choice}" != "1" ]]; then
             info "保留现有配置，仅启动服务"
             start_service
+            maybe_start_cursor_bridge_sidecar || true
             show_result
             return 0
         fi
@@ -2416,6 +2429,7 @@ cmd_deploy() {
     esac
 
     start_service
+    maybe_start_cursor_bridge_sidecar || true
     show_result
 }
 
@@ -2517,6 +2531,7 @@ cmd_start() {
     sync_api_key_from_config
 
     start_service
+    maybe_start_cursor_bridge_sidecar || true
 
     echo ""
     info "代理地址: ${GREEN}http://127.0.0.1:${CPA_PORT}${NC}"
@@ -2536,6 +2551,7 @@ cmd_restart() {
     cd "${SCRIPT_DIR}"
     CPA_PORT="${CPA_PORT}" $COMPOSE_CMD -f "${COMPOSE_FILE}" restart 2>&1 | tail -1
     info "服务已重启"
+    cursor_bridge_connect_cpa || true
 }
 
 cmd_status() {
@@ -3714,6 +3730,397 @@ cmd_sub2api() {
     esac
 }
 
+# ========================== Cursor Bridge sidecar ============================
+
+require_cursor_bridge_compose() {
+    if ! command -v docker &>/dev/null; then
+        error "未检测到 Docker"
+        return 1
+    fi
+    if ! docker info &>/dev/null 2>&1; then
+        error "Docker 守护进程未运行"
+        return 1
+    fi
+    if ! docker compose version &>/dev/null 2>&1; then
+        error "Cursor Bridge 要求 Docker Compose v2"
+        return 1
+    fi
+    assert_regular_file "${CURSOR_BRIDGE_COMPOSE_FILE}" || return 1
+    assert_regular_file "${CURSOR_BRIDGE_GUARD_CONF}" || return 1
+}
+
+cursor_bridge_compose() {
+    COMPOSE_PROJECT_NAME="${CURSOR_BRIDGE_PROJECT_NAME}" docker compose \
+        -f "${CURSOR_BRIDGE_COMPOSE_FILE}" "$@"
+}
+
+cursor_bridge_env_value() {
+    local key="$1"
+    [[ -f "${CURSOR_BRIDGE_ENV_FILE}" ]] || return 0
+    awk -F= -v wanted="${key}" '
+        $1 == wanted {
+            sub(/^[^=]*=/, "")
+            sub(/\r$/, "")
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            gsub(/^"|"$/, "")
+            print
+            exit
+        }
+    ' "${CURSOR_BRIDGE_ENV_FILE}"
+}
+
+validate_cursor_bridge_env() {
+    assert_regular_file "${CURSOR_BRIDGE_ENV_FILE}" || return 1
+    local cursor_key bridge_key
+    cursor_key="$(cursor_bridge_env_value CURSOR_API_KEY)"
+    bridge_key="$(cursor_bridge_env_value CURSOR_BRIDGE_API_KEY)"
+    [[ -n "${cursor_key}" && "${cursor_key}" != replace-locally-* ]] || {
+        error "运行 bash deploy.sh cursor-bridge，按提示粘贴 Cursor API key"
+        return 1
+    }
+    [[ "${bridge_key}" =~ ^[A-Fa-f0-9]{64}$ ]] || {
+        error "CURSOR_BRIDGE_API_KEY 必须是 64 位 hex，请重跑 bash deploy.sh cursor-bridge init"
+        return 1
+    }
+    [[ "${cursor_key}" != "${bridge_key}" ]] || {
+        error "两把 Cursor Bridge key 必须不同"
+        return 1
+    }
+    if [[ -n "${CPA_API_KEY}" && ( "${cursor_key}" == "${CPA_API_KEY}" || "${bridge_key}" == "${CPA_API_KEY}" ) ]]; then
+        error "禁止复用 CPA_API_KEY"
+        return 1
+    fi
+    if [[ -n "${CPA_MANAGEMENT_KEY}" && ( "${cursor_key}" == "${CPA_MANAGEMENT_KEY}" || "${bridge_key}" == "${CPA_MANAGEMENT_KEY}" ) ]]; then
+        error "禁止复用 CPA_MANAGEMENT_KEY"
+        return 1
+    fi
+    if grep -Eq '^[[:space:]]*(CURSOR_CONFIG_DIRS|CURSOR_ACCOUNT_DIRS)=' "${CURSOR_BRIDGE_ENV_FILE}"; then
+        error "cursor-bridge.env 不能设 CURSOR_CONFIG_DIRS / CURSOR_ACCOUNT_DIRS"
+        return 1
+    fi
+    chmod 600 "${CURSOR_BRIDGE_ENV_FILE}" 2>/dev/null || true
+}
+
+set_cursor_bridge_env_key() {
+    local name="$1" value_file="$2" tmp
+    tmp="$(umask 077; mktemp "${SCRIPT_DIR}/cursor-bridge.env.tmp.XXXXXX")" || return 1
+    awk -v k="${name}" -v vf="${value_file}" '
+        BEGIN { getline v < vf; close(vf) }
+        index($0, k "=") == 1 { print k "=" v; found=1; next }
+        { print }
+        END { if (!found) print k "=" v }
+    ' "${CURSOR_BRIDGE_ENV_FILE}" > "${tmp}"
+    mv "${tmp}" "${CURSOR_BRIDGE_ENV_FILE}"
+    chmod 600 "${CURSOR_BRIDGE_ENV_FILE}" 2>/dev/null || true
+}
+
+prompt_cursor_api_key() {
+    local current force="${1:-}" key value_file
+    current="$(cursor_bridge_env_value CURSOR_API_KEY)"
+    if [[ -z "${force}" && -n "${current}" && "${current}" != replace-locally-* ]]; then
+        if ! confirm "已保存一把 Cursor key，要更换吗？" "n"; then
+            return 0
+        fi
+    fi
+    if [[ ! -t 0 ]]; then
+        error "需要交互输入 Cursor API key。在终端运行 bash deploy.sh cursor-bridge"
+        return 1
+    fi
+    echo ""
+    echo -e "  ${DIM}从 https://cursor.com/dashboard/api 创建 key，弹窗里复制完整值。输入时不显示。${NC}"
+    echo -en "  ${MAGENTA}?${NC}  粘贴 Cursor API key: "
+    IFS= read -rs key
+    echo ""
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ -n "${key}" ]] || { error "key 不能为空"; return 1; }
+    [[ "${key}" != replace-locally-* ]] || { error "请粘贴真实的 Cursor key"; return 1; }
+    value_file="$(umask 077; mktemp "${SCRIPT_DIR}/cursor-bridge.env.tmp.XXXXXX")" || return 1
+    printf '%s' "${key}" > "${value_file}"
+    set_cursor_bridge_env_key CURSOR_API_KEY "${value_file}"
+    rm -f "${value_file}"
+    info "已写入 CURSOR_API_KEY（不会打印）"
+}
+
+ensure_cursor_bridge_ready() {
+    create_cursor_bridge_env || return 1
+    local cursor_key bridge_key value_file
+    bridge_key="$(cursor_bridge_env_value CURSOR_BRIDGE_API_KEY)"
+    if [[ ! "${bridge_key}" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+        bridge_key="$(generate_hex_secret 32)" || return 1
+        value_file="$(umask 077; mktemp "${SCRIPT_DIR}/cursor-bridge.env.tmp.XXXXXX")" || return 1
+        printf '%s' "${bridge_key}" > "${value_file}"
+        set_cursor_bridge_env_key CURSOR_BRIDGE_API_KEY "${value_file}"
+        rm -f "${value_file}"
+        info "已自动生成 CURSOR_BRIDGE_API_KEY"
+    fi
+    cursor_key="$(cursor_bridge_env_value CURSOR_API_KEY)"
+    if [[ -z "${cursor_key}" || "${cursor_key}" == replace-locally-* ]]; then
+        prompt_cursor_api_key force || return 1
+    fi
+    validate_cursor_bridge_env
+}
+
+create_cursor_bridge_env() {
+    if [[ -e "${CURSOR_BRIDGE_ENV_FILE}" ]]; then
+        assert_regular_file "${CURSOR_BRIDGE_ENV_FILE}" || return 1
+        chmod 600 "${CURSOR_BRIDGE_ENV_FILE}" 2>/dev/null || true
+        return 0
+    fi
+    assert_safe_path "${CURSOR_BRIDGE_ENV_FILE}" true || return 1
+    assert_regular_file "${CURSOR_BRIDGE_ENV_EXAMPLE_FILE}" || return 1
+    local bridge_key temp_file
+    bridge_key="$(generate_hex_secret 32)" || return 1
+    temp_file="$(umask 077; mktemp "${SCRIPT_DIR}/cursor-bridge.env.tmp.XXXXXX")" || {
+        error "无法创建 cursor-bridge.env"
+        return 1
+    }
+    sed "s/replace-locally-with-random-64-hex-key/${bridge_key}/" "${CURSOR_BRIDGE_ENV_EXAMPLE_FILE}" > "${temp_file}"
+    chmod 600 "${temp_file}" 2>/dev/null || true
+    if [[ -e "${CURSOR_BRIDGE_ENV_FILE}" ]]; then
+        rm -f "${temp_file}"
+        error "cursor-bridge.env 已被其他进程创建，请重试"
+        return 1
+    fi
+    mv "${temp_file}" "${CURSOR_BRIDGE_ENV_FILE}"
+}
+
+ensure_cursor_bridge_image() {
+    if docker image inspect "${CURSOR_BRIDGE_IMAGE}" >/dev/null 2>&1; then
+        return 0
+    fi
+    step "构建钉死 Cursor Bridge 镜像"
+    if command -v docker >/dev/null && docker buildx version >/dev/null 2>&1; then
+        docker buildx build --load \
+            --label "org.opencontainers.image.source=${CURSOR_BRIDGE_SOURCE_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${CURSOR_BRIDGE_SOURCE_COMMIT}" \
+            -t "${CURSOR_BRIDGE_IMAGE}" \
+            "${CURSOR_BRIDGE_SOURCE_REPOSITORY}.git#${CURSOR_BRIDGE_SOURCE_COMMIT}"
+    else
+        docker build \
+            --label "org.opencontainers.image.source=${CURSOR_BRIDGE_SOURCE_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${CURSOR_BRIDGE_SOURCE_COMMIT}" \
+            -t "${CURSOR_BRIDGE_IMAGE}" \
+            "${CURSOR_BRIDGE_SOURCE_REPOSITORY}.git#${CURSOR_BRIDGE_SOURCE_COMMIT}"
+    fi
+}
+
+cursor_bridge_connect_cpa() {
+    if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        warn "${CONTAINER_NAME} 未运行，先 bash deploy.sh start，再挂 Cursor Bridge 网"
+        return 1
+    fi
+    if docker inspect "${CONTAINER_NAME}" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null | grep -Fq "${CURSOR_BRIDGE_NETWORK}"; then
+        return 0
+    fi
+    docker network connect "${CURSOR_BRIDGE_NETWORK}" "${CONTAINER_NAME}"
+    info "已把 ${CONTAINER_NAME} 挂到 ${CURSOR_BRIDGE_NETWORK}"
+}
+
+cursor_bridge_ensure_openai_compatibility() {
+    if [[ ! -f "${CONFIG_FILE}" ]]; then
+        warn "没有 config.yaml，跳过 openai-compatibility"
+        return 0
+    fi
+    assert_regular_file "${CONFIG_FILE}" || return 1
+    if grep -Eq '^[[:space:]]*-[[:space:]]*name:[[:space:]]*cursor-bridge[[:space:]]*$' "${CONFIG_FILE}"; then
+        info "config.yaml 已有 cursor-bridge"
+        return 0
+    fi
+    local bridge_key tmp backup
+    bridge_key="$(cursor_bridge_env_value CURSOR_BRIDGE_API_KEY)"
+    [[ "${bridge_key}" =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
+    backup="${SCRIPT_DIR}/config.yaml.bak.cursor-bridge"
+    if [[ ! -e "${backup}" ]]; then
+        cp "${CONFIG_FILE}" "${backup}"
+        chmod 600 "${backup}" 2>/dev/null || true
+    fi
+    tmp="$(umask 077; mktemp "${SCRIPT_DIR}/config.yaml.tmp.XXXXXX")" || return 1
+    {
+        cat "${CONFIG_FILE}"
+        if grep -Eq '^[[:space:]]*openai-compatibility:' "${CONFIG_FILE}"; then
+            printf '\n  - name: cursor-bridge\n    prefix: cursor\n    base-url: http://cursor-bridge-guard:8080/v1\n    api-key-entries:\n      - api-key: "%s"\n    models:\n      - name: auto\n        alias: cursor-auto\n' "${bridge_key}"
+        else
+            printf '\nopenai-compatibility:\n  - name: cursor-bridge\n    prefix: cursor\n    base-url: http://cursor-bridge-guard:8080/v1\n    api-key-entries:\n      - api-key: "%s"\n    models:\n      - name: auto\n        alias: cursor-auto\n' "${bridge_key}"
+        fi
+    } > "${tmp}"
+    mv "${tmp}" "${CONFIG_FILE}"
+    chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+    warn "已追加 openai-compatibility。低峰运行 bash deploy.sh restart 才能加载（会短中断）"
+}
+
+maybe_start_cursor_bridge_sidecar() {
+    [[ -f "${CURSOR_BRIDGE_ENV_FILE}" ]] || return 0
+    if ! validate_cursor_bridge_env >/dev/null 2>&1; then
+        detail "发现 cursor-bridge.env 但还缺 Cursor key。在终端执行: bash deploy.sh cursor-bridge"
+        return 0
+    fi
+    info "检测到 cursor-bridge.env，同时启动 Cursor Bridge"
+    cmd_cursor_bridge_start || warn "Cursor Bridge 启动失败，CPA 已在运行。可单独执行 bash deploy.sh cursor-bridge start"
+}
+
+cmd_cursor_bridge_init() {
+    require_cursor_bridge_compose || return 1
+    create_cursor_bridge_env || return 1
+    prompt_cursor_api_key || return 1
+    ensure_cursor_bridge_ready || return 1
+    info "Cursor Bridge 已初始化。接下来: bash deploy.sh cursor-bridge start"
+}
+
+cmd_cursor_bridge_build() {
+    require_cursor_bridge_compose || return 1
+    validate_cursor_bridge_env || return 1
+    if docker image inspect "${CURSOR_BRIDGE_IMAGE}" >/dev/null 2>&1; then
+        docker rmi "${CURSOR_BRIDGE_IMAGE}" >/dev/null 2>&1 || true
+    fi
+    ensure_cursor_bridge_image
+    info "已构建 ${CURSOR_BRIDGE_IMAGE}"
+}
+
+cmd_cursor_bridge_configure() {
+    require_cursor_bridge_compose || return 1
+    create_cursor_bridge_env || return 1
+    prompt_cursor_api_key force || return 1
+    ensure_cursor_bridge_ready || return 1
+    if docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" >/dev/null 2>&1; then
+        cursor_bridge_compose up -d
+        cursor_bridge_connect_cpa || true
+        info "已更换 Cursor key 并重建桥容器"
+    else
+        info "已更换 Cursor key。接下来: bash deploy.sh cursor-bridge start"
+    fi
+}
+
+cmd_cursor_bridge_start() {
+    require_cursor_bridge_compose || return 1
+    ensure_cursor_bridge_ready || return 1
+    ensure_cursor_bridge_image || return 1
+    cursor_bridge_compose config --quiet || { error "Cursor Bridge Compose 校验失败"; return 1; }
+    cursor_bridge_compose up -d
+    cursor_bridge_connect_cpa || true
+    cursor_bridge_ensure_openai_compatibility || true
+    info "Cursor Bridge 已启动（守卫 :8080，无主机端口）"
+}
+
+cmd_cursor_bridge_stop() {
+    require_cursor_bridge_compose || return 1
+    cursor_bridge_compose stop
+    info "Cursor Bridge 已停止（未动 CPA）"
+}
+
+cmd_cursor_bridge_restart() {
+    require_cursor_bridge_compose || return 1
+    validate_cursor_bridge_env || return 1
+    cursor_bridge_compose restart
+    cursor_bridge_connect_cpa || true
+    info "Cursor Bridge 已重启"
+}
+
+cmd_cursor_bridge_status() {
+    require_cursor_bridge_compose || return 1
+    cursor_bridge_compose ps
+    if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        if docker inspect "${CONTAINER_NAME}" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null | grep -Fq "${CURSOR_BRIDGE_NETWORK}"; then
+            info "${CONTAINER_NAME} 已在 ${CURSOR_BRIDGE_NETWORK}"
+        else
+            warn "${CONTAINER_NAME} 还没挂 ${CURSOR_BRIDGE_NETWORK}"
+        fi
+    fi
+}
+
+cmd_cursor_bridge_logs() {
+    require_cursor_bridge_compose || return 1
+    if [[ -n "${1:-}" ]]; then
+        cursor_bridge_compose logs -f --tail 200 "$1"
+    else
+        cursor_bridge_compose logs -f --tail 200
+    fi
+}
+
+cmd_cursor_bridge_doctor() {
+    require_cursor_bridge_compose || return 1
+    validate_cursor_bridge_env || return 1
+    cursor_bridge_compose config --quiet || { error "Compose 校验失败"; return 1; }
+    docker image inspect "${CURSOR_BRIDGE_IMAGE}" >/dev/null 2>&1 || { error "缺少钉死镜像 ${CURSOR_BRIDGE_IMAGE}"; return 1; }
+    local user ports logs cursor_key bridge_key code
+    user="$(docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" --format '{{.Config.User}}' 2>/dev/null || true)"
+    [[ "${user}" == "app" ]] || { error "cursor-bridge 必须以 user=app 运行"; return 1; }
+    ports="$(docker port "${CURSOR_BRIDGE_CONTAINER_NAME}" 2>/dev/null || true)$(docker port "${CURSOR_BRIDGE_GUARD_CONTAINER_NAME}" 2>/dev/null || true)"
+    printf '%s' "${ports}" | grep -Fq '0.0.0.0:' && { error "桥端口绑到了 0.0.0.0"; return 1; }
+    if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        docker inspect "${CONTAINER_NAME}" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null | grep -Fq "${CURSOR_BRIDGE_NETWORK}" \
+            || { error "CPA 未挂 ${CURSOR_BRIDGE_NETWORK}"; return 1; }
+        code="$(docker exec "${CONTAINER_NAME}" wget -qS -O /dev/null "http://cursor-bridge-guard:8080/v1/models" 2>&1 | awk '/HTTP\//{print $2}' | tail -1 || true)"
+        if [[ -z "${code}" ]]; then
+            code="$(docker exec "${CONTAINER_NAME}" curl -sS -o /dev/null -w '%{http_code}' "http://cursor-bridge-guard:8080/v1/models" 2>/dev/null || true)"
+        fi
+        [[ "${code}" == "401" ]] || warn "无 Bearer 打守卫应为 401，实际 ${code:-unknown}"
+    fi
+    cursor_key="$(cursor_bridge_env_value CURSOR_API_KEY)"
+    bridge_key="$(cursor_bridge_env_value CURSOR_BRIDGE_API_KEY)"
+    logs="$(docker logs "${CURSOR_BRIDGE_CONTAINER_NAME}" 2>&1 || true)\n$(docker logs "${CURSOR_BRIDGE_GUARD_CONTAINER_NAME}" 2>&1 || true)"
+    if [[ -n "${cursor_key}" && "${logs}" == *"${cursor_key}"* ]] || [[ -n "${bridge_key}" && "${logs}" == *"${bridge_key}"* ]]; then
+        error "日志里出现了 key"
+        return 1
+    fi
+    info "Cursor Bridge doctor PASS"
+    cmd_cursor_bridge_status
+}
+
+cmd_cursor_bridge_uninstall() {
+    require_cursor_bridge_compose || return 1
+    if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        docker network disconnect "${CURSOR_BRIDGE_NETWORK}" "${CONTAINER_NAME}" 2>/dev/null || true
+    fi
+    cursor_bridge_compose down --remove-orphans
+    info "Cursor Bridge 已卸载（未删 CPA 卷）"
+    detail "若已追加 openai-compatibility，请从 config.yaml 删掉 cursor-bridge 段后 bash deploy.sh restart"
+    if [[ -f "${CURSOR_BRIDGE_ENV_FILE}" ]] && confirm "是否删除包含密钥的 cursor-bridge.env？" "n"; then
+        assert_regular_file "${CURSOR_BRIDGE_ENV_FILE}" || return 1
+        rm -f "${CURSOR_BRIDGE_ENV_FILE}"
+        info "cursor-bridge.env 已删除"
+    fi
+}
+
+show_cursor_bridge_help() {
+    echo ""
+    echo -e "  ${BOLD}Cursor Bridge sidecar${NC}"
+    echo -e "  bash deploy.sh cursor-bridge ${DIM}[action]${NC}"
+    echo ""
+    echo -e "    ${CYAN}start${NC}      缺 key 就提示输入，然后构建并启动（默认）"
+    echo -e "    ${CYAN}init${NC}       生成 env，提示输入一把 Cursor key"
+    echo -e "    ${CYAN}configure${NC}  更换 Cursor key，并重建桥容器"
+    echo -e "    ${CYAN}stop${NC}       停止桥，不动 CPA"
+    echo -e "    ${CYAN}restart${NC}    重启桥容器"
+    echo -e "    ${CYAN}status${NC}     查看桥和挂网状态"
+    echo -e "    ${CYAN}logs [服务]${NC} 查看日志"
+    echo -e "    ${CYAN}build${NC}      重新构建钉死镜像"
+    echo -e "    ${CYAN}doctor${NC}     检查钉死、端口、挂网、401"
+    echo -e "    ${CYAN}uninstall${NC}  拆桥；不删 CPA 卷"
+    echo ""
+    echo -e "  ${DIM}默认向导不会安装这座桥。执行 bash deploy.sh cursor-bridge，按提示粘贴一把 Cursor key。${NC}"
+    echo ""
+}
+
+cmd_cursor_bridge() {
+    local action="${1:-start}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${action}" in
+        start|deploy) cmd_cursor_bridge_start ;;
+        init) cmd_cursor_bridge_init ;;
+        configure) cmd_cursor_bridge_configure ;;
+        build) cmd_cursor_bridge_build ;;
+        stop) cmd_cursor_bridge_stop ;;
+        restart) cmd_cursor_bridge_restart ;;
+        status) cmd_cursor_bridge_status ;;
+        logs) cmd_cursor_bridge_logs "${1:-}" ;;
+        doctor) cmd_cursor_bridge_doctor ;;
+        uninstall) cmd_cursor_bridge_uninstall ;;
+        help|--help|-h) show_cursor_bridge_help ;;
+        *) error "未知 Cursor Bridge 操作: ${action}"; show_cursor_bridge_help; return 1 ;;
+    esac
+}
+
 # ========================== 帮助信息 ==========================================
 
 show_help() {
@@ -3747,6 +4154,7 @@ show_help() {
     echo -e "    ${CYAN}uninstall${NC}    完全卸载"
     echo -e "    ${CYAN}setup-claude${NC} 自动配置 Claude Code 环境"
     echo -e "    ${CYAN}sub2api [操作]${NC} 管理独立的 Sub2API 一键部署"
+    echo -e "    ${CYAN}cursor-bridge [操作]${NC} 管理可选 Cursor Bridge sidecar"
     echo -e "    ${CYAN}help${NC}         显示此帮助"
     echo ""
     echo -e "  ${BOLD}环境变量:${NC}"
@@ -3768,6 +4176,9 @@ show_help() {
     echo ""
     echo -e "    ${DIM}# 一键部署独立 Sub2API 栈${NC}"
     echo -e "    bash deploy.sh sub2api deploy"
+    echo ""
+    echo -e "    ${DIM}# 一键部署可选 Cursor Bridge sidecar（会提示输入一把 Cursor key）${NC}"
+    echo -e "    bash deploy.sh cursor-bridge"
     echo ""
     echo -e "    ${DIM}# 启用每日自动更新（默认 04:20）${NC}"
     echo -e "    bash deploy.sh enable-auto-update"
@@ -3826,6 +4237,7 @@ main() {
         uninstall)  cmd_uninstall ;;
         setup-claude) cmd_setup_claude ;;
         sub2api) shift; cmd_sub2api "$@" ;;
+        cursor-bridge) shift; cmd_cursor_bridge "$@" ;;
         help|--help|-h) show_help ;;
         "")         cmd_deploy ;;
         *)          error "未知命令: $1"; show_help; exit 1 ;;

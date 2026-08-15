@@ -8,6 +8,7 @@ Do not commit:
 - `.env`
 - `sub2api.env`
 - `cursor-bridge.env`
+- `config.yaml.bak.cursor-bridge`
 - OAuth credential JSON files
 - Docker volume backups for `cli-proxy-manager-auth`
 - Backups of the `sub2api-manager-data`, `sub2api-manager-postgres`, and

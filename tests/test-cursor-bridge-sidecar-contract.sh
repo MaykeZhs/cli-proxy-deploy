@@ -251,8 +251,23 @@ if "cursor-bridge-backend" not in guard_net_names:
     fail("guard must join cursor-bridge-backend")
 '
 
-if grep -Eq 'docker-compose\.cursor-bridge\.yml' "$ROOT_DIR/deploy.sh" "$ROOT_DIR/deploy.ps1"; then
-  fail "deploy.sh / deploy.ps1 must not reference docker-compose.cursor-bridge.yml in v1"
+contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge' "deploy.sh must dispatch cursor-bridge"
+contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge' "deploy.ps1 must dispatch cursor-bridge"
+contains "$ROOT_DIR/deploy.sh" 'prompt_cursor_api_key' "deploy.sh must prompt for the Cursor key"
+contains "$ROOT_DIR/deploy.sh" 'read -rs key' "deploy.sh must hide Cursor key input"
+contains "$ROOT_DIR/deploy.ps1" 'Read-Host -AsSecureString' "deploy.ps1 must hide Cursor key input"
+contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_configure' "deploy.sh must support cursor-bridge configure"
+contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-configure' "deploy.ps1 must support cursor-bridge configure"
+contains "$ROOT_DIR/deploy.sh" "CURSOR_BRIDGE_IMAGE=\"$EXPECTED_IMAGE\"" "deploy.sh must pin CURSOR_BRIDGE_IMAGE"
+contains "$ROOT_DIR/deploy.ps1" "CURSOR_BRIDGE_IMAGE            = '$EXPECTED_IMAGE'" "deploy.ps1 must pin CURSOR_BRIDGE_IMAGE"
+grep -Eq '^[[:space:]]*""[[:space:]]*\)[[:space:]]*cmd_deploy' "$ROOT_DIR/deploy.sh" || fail "deploy.sh default wizard must stay cmd_deploy"
+grep -Eq "start\)[[:space:]]*cmd_start" "$ROOT_DIR/deploy.sh" || fail "deploy.sh start must stay cmd_start"
+grep -Eq "''[[:space:]]*\{[[:space:]]*cmd-deploy" "$ROOT_DIR/deploy.ps1" || fail "deploy.ps1 default wizard must stay cmd-deploy"
+if awk '/^cmd_cursor_bridge_uninstall\(\)/,/^cmd_cursor_bridge\(\)/' "$ROOT_DIR/deploy.sh" | grep -Fq -- '--volumes'; then
+  fail "cursor-bridge uninstall must not use --volumes"
+fi
+if awk '/function cmd-cursor-bridge-uninstall/,/function show-cursor-bridge-help/' "$ROOT_DIR/deploy.ps1" | grep -Fq -- '--volumes'; then
+  fail "ps1 cursor-bridge uninstall must not use --volumes"
 fi
 
 printf 'PASS: Cursor Bridge sidecar static contract is isolated and hardened\n'

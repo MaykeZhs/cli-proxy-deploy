@@ -23,6 +23,7 @@
 #          .\deploy.ps1 uninstall # 完全卸载
 #          .\deploy.ps1 setup-claude # 配置 Claude Code
 #          .\deploy.ps1 sub2api deploy # 一键部署 Sub2API
+#          .\deploy.ps1 cursor-bridge start # 启动可选 Cursor Bridge sidecar
 #
 # =============================================================================
 
@@ -53,6 +54,17 @@ $script:SUB2API_PROJECT_NAME     = 'sub2api-manager'
 $script:SUB2API_CONTAINER_NAME   = 'sub2api-manager'
 $script:SUB2API_POSTGRES_CONTAINER_NAME = 'sub2api-manager-postgres'
 $script:SUB2API_REDIS_CONTAINER_NAME    = 'sub2api-manager-redis'
+$script:CURSOR_BRIDGE_COMPOSE_FILE     = Join-Path $script:SCRIPT_DIR 'docker-compose.cursor-bridge.yml'
+$script:CURSOR_BRIDGE_ENV_FILE         = Join-Path $script:SCRIPT_DIR 'cursor-bridge.env'
+$script:CURSOR_BRIDGE_ENV_EXAMPLE_FILE = Join-Path $script:SCRIPT_DIR 'cursor-bridge.env.example'
+$script:CURSOR_BRIDGE_GUARD_CONF       = Join-Path $script:SCRIPT_DIR 'cursor-bridge/nginx-guard.conf'
+$script:CURSOR_BRIDGE_PROJECT_NAME     = 'cursor-bridge'
+$script:CURSOR_BRIDGE_CONTAINER_NAME   = 'cursor-bridge'
+$script:CURSOR_BRIDGE_GUARD_CONTAINER_NAME = 'cursor-bridge-guard'
+$script:CURSOR_BRIDGE_NETWORK          = 'cpa-cursor-bridge'
+$script:CURSOR_BRIDGE_SOURCE_REPOSITORY = 'https://github.com/anyrobert/cursor-api-proxy'
+$script:CURSOR_BRIDGE_SOURCE_COMMIT    = 'c0ff1f941215027c0a8f658ca5d01f806559208f'
+$script:CURSOR_BRIDGE_IMAGE            = 'cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f'
 
 # 用户可配置（在 .env 中覆盖）
 $script:CPA_PORT           = if ($env:CPA_PORT)           { $env:CPA_PORT }           else { '8317' }
@@ -2256,6 +2268,7 @@ function cmd-deploy {
         if ($configChoice -ne '1') {
             info '保留现有配置，仅启动服务'
             start-service
+            try { Start-CursorBridgeSidecarIfReady } catch { warn $_.Exception.Message }
             show-result
             return
         }
@@ -2290,6 +2303,7 @@ function cmd-deploy {
     }
 
     start-service
+    try { Start-CursorBridgeSidecarIfReady } catch { warn $_.Exception.Message }
     show-result
 }
 
@@ -2399,6 +2413,7 @@ function cmd-start {
     Sync-ApiKeyFromConfig
 
     start-service
+    try { Start-CursorBridgeSidecarIfReady } catch { warn $_.Exception.Message }
 
     Write-Host ''
     info "代理地址: http://127.0.0.1:$($script:CPA_PORT)"
@@ -2423,6 +2438,7 @@ function cmd-restart {
         $env:CPA_PORT = $script:CPA_PORT
         Invoke-Compose -f $script:COMPOSE_FILE restart 2>&1 | Select-Object -Last 1
         info '服务已重启'
+        try { Connect-CursorBridgeCpa } catch { }
     } finally { Pop-Location }
 }
 
@@ -3393,6 +3409,406 @@ function cmd-sub2api {
     }
 }
 
+# ========================== Cursor Bridge sidecar ============================
+
+function Require-CursorBridgeCompose {
+    try { $null = Get-Command docker -ErrorAction Stop }
+    catch { throw '未检测到 Docker' }
+    $null = docker info 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Docker 守护进程未运行' }
+    $null = docker compose version 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Cursor Bridge 要求 Docker Compose v2' }
+    $script:COMPOSE_CMD = 'docker compose'
+    Assert-RegularFile $script:CURSOR_BRIDGE_COMPOSE_FILE
+    Assert-RegularFile $script:CURSOR_BRIDGE_GUARD_CONF
+}
+
+function Invoke-CursorBridgeCompose {
+    $previousProject = $env:COMPOSE_PROJECT_NAME
+    $env:COMPOSE_PROJECT_NAME = $script:CURSOR_BRIDGE_PROJECT_NAME
+    try {
+        Invoke-Compose -f $script:CURSOR_BRIDGE_COMPOSE_FILE @args
+    } finally {
+        if ($null -eq $previousProject) { Remove-Item Env:COMPOSE_PROJECT_NAME -ErrorAction SilentlyContinue }
+        else { $env:COMPOSE_PROJECT_NAME = $previousProject }
+    }
+}
+
+function Set-CursorBridgeEnvPermissions($path) {
+    Set-Sub2ApiEnvPermissions $path
+}
+
+function Get-CursorBridgeEnvValue($key) {
+    if (-not (Test-Path $script:CURSOR_BRIDGE_ENV_FILE -PathType Leaf)) { return '' }
+    foreach ($line in Get-Content $script:CURSOR_BRIDGE_ENV_FILE) {
+        if ($line -match "^$([regex]::Escape($key))=(.*)$") {
+            return $Matches[1].Trim().Trim('"').Trim("'")
+        }
+    }
+    return ''
+}
+
+function Test-CursorBridgeEnvironment {
+    Assert-RegularFile $script:CURSOR_BRIDGE_ENV_FILE
+    $cursorKey = Get-CursorBridgeEnvValue 'CURSOR_API_KEY'
+    $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
+    if (-not $cursorKey -or $cursorKey.StartsWith('replace-locally-')) {
+        throw '运行 .\deploy.ps1 cursor-bridge，按提示粘贴 Cursor API key'
+    }
+    if ($bridgeKey -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw 'CURSOR_BRIDGE_API_KEY 必须是 64 位 hex，请重跑 .\deploy.ps1 cursor-bridge init'
+    }
+    if ($cursorKey -eq $bridgeKey) { throw '两把 Cursor Bridge key 必须不同' }
+    if ($script:CPA_API_KEY -and ($cursorKey -eq $script:CPA_API_KEY -or $bridgeKey -eq $script:CPA_API_KEY)) {
+        throw '禁止复用 CPA_API_KEY'
+    }
+    if ($script:CPA_MANAGEMENT_KEY -and ($cursorKey -eq $script:CPA_MANAGEMENT_KEY -or $bridgeKey -eq $script:CPA_MANAGEMENT_KEY)) {
+        throw '禁止复用 CPA_MANAGEMENT_KEY'
+    }
+    $raw = Get-Content $script:CURSOR_BRIDGE_ENV_FILE -Raw
+    if ($raw -match '(?m)^\s*(CURSOR_CONFIG_DIRS|CURSOR_ACCOUNT_DIRS)=') {
+        throw 'cursor-bridge.env 不能设 CURSOR_CONFIG_DIRS / CURSOR_ACCOUNT_DIRS'
+    }
+    Set-CursorBridgeEnvPermissions $script:CURSOR_BRIDGE_ENV_FILE
+}
+
+function New-CursorBridgeEnvironment {
+    if (Test-Path $script:CURSOR_BRIDGE_ENV_FILE) {
+        Assert-RegularFile $script:CURSOR_BRIDGE_ENV_FILE
+        Set-CursorBridgeEnvPermissions $script:CURSOR_BRIDGE_ENV_FILE
+        return
+    }
+    Assert-SafeRepoPath $script:CURSOR_BRIDGE_ENV_FILE $true
+    Assert-RegularFile $script:CURSOR_BRIDGE_ENV_EXAMPLE_FILE
+    $bridgeKey = New-CryptoHex 32
+    $temp = Join-Path $script:SCRIPT_DIR ("cursor-bridge.env.tmp.{0}" -f [guid]::NewGuid().ToString('N'))
+    (Get-Content $script:CURSOR_BRIDGE_ENV_EXAMPLE_FILE -Raw) -replace 'replace-locally-with-random-64-hex-key', $bridgeKey |
+        Set-Content -Path $temp -Encoding utf8
+    Set-CursorBridgeEnvPermissions $temp
+    if (Test-Path $script:CURSOR_BRIDGE_ENV_FILE) {
+        Remove-Item $temp -Force
+        throw 'cursor-bridge.env 已被其他进程创建，请重试'
+    }
+    Move-Item $temp $script:CURSOR_BRIDGE_ENV_FILE
+}
+
+function Set-CursorBridgeEnvKey($name, $value) {
+    Assert-RegularFile $script:CURSOR_BRIDGE_ENV_FILE
+    $lines = @(Get-Content $script:CURSOR_BRIDGE_ENV_FILE)
+    $found = $false
+    $out = foreach ($line in $lines) {
+        if ($line -match "^$([regex]::Escape($name))=") {
+            $found = $true
+            "$name=$value"
+        } else {
+            $line
+        }
+    }
+    if (-not $found) { $out += "$name=$value" }
+    $temp = Join-Path $script:SCRIPT_DIR ("cursor-bridge.env.tmp.{0}" -f [guid]::NewGuid().ToString('N'))
+    Set-Content -Path $temp -Value $out -Encoding utf8
+    Set-CursorBridgeEnvPermissions $temp
+    Move-Item -Force $temp $script:CURSOR_BRIDGE_ENV_FILE
+    Set-CursorBridgeEnvPermissions $script:CURSOR_BRIDGE_ENV_FILE
+}
+
+function Read-HiddenCursorApiKey {
+    if ([Console]::IsInputRedirected) {
+        throw '需要交互输入 Cursor API key。在终端运行 .\deploy.ps1 cursor-bridge'
+    }
+    Write-Host ''
+    Write-Host '  从 https://cursor.com/dashboard/api 创建 key，弹窗里复制完整值。输入时不显示。' -ForegroundColor DarkGray
+    Write-Host '  ?  粘贴 Cursor API key: ' -ForegroundColor Magenta -NoNewline
+    $secure = Read-Host -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        if ($null -ne $secure) { $secure.Dispose() }
+    }
+}
+
+function Request-CursorApiKey {
+    param([switch]$Force)
+    $current = Get-CursorBridgeEnvValue 'CURSOR_API_KEY'
+    if (-not $Force -and $current -and -not $current.StartsWith('replace-locally-')) {
+        if (-not (confirm-prompt '已保存一把 Cursor key，要更换吗？' 'n')) { return }
+    }
+    $key = (Read-HiddenCursorApiKey).Trim()
+    if (-not $key) { throw 'key 不能为空' }
+    if ($key.StartsWith('replace-locally-')) { throw '请粘贴真实的 Cursor key' }
+    Set-CursorBridgeEnvKey 'CURSOR_API_KEY' $key
+    info '已写入 CURSOR_API_KEY（不会打印）'
+}
+
+function Ensure-CursorBridgeReady {
+    New-CursorBridgeEnvironment
+    $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
+    if ($bridgeKey -notmatch '^[A-Fa-f0-9]{64}$') {
+        Set-CursorBridgeEnvKey 'CURSOR_BRIDGE_API_KEY' (New-CryptoHex 32)
+        info '已自动生成 CURSOR_BRIDGE_API_KEY'
+    }
+    $cursorKey = Get-CursorBridgeEnvValue 'CURSOR_API_KEY'
+    if (-not $cursorKey -or $cursorKey.StartsWith('replace-locally-')) {
+        Request-CursorApiKey -Force
+    }
+    Test-CursorBridgeEnvironment
+}
+
+function Ensure-CursorBridgeImage {
+    $null = docker image inspect $script:CURSOR_BRIDGE_IMAGE 2>$null
+    if ($LASTEXITCODE -eq 0) { return }
+    step '构建钉死 Cursor Bridge 镜像'
+    $context = "$($script:CURSOR_BRIDGE_SOURCE_REPOSITORY).git#$($script:CURSOR_BRIDGE_SOURCE_COMMIT)"
+    $labels = @(
+        "--label", "org.opencontainers.image.source=$($script:CURSOR_BRIDGE_SOURCE_REPOSITORY)",
+        "--label", "org.opencontainers.image.revision=$($script:CURSOR_BRIDGE_SOURCE_COMMIT)",
+        "-t", $script:CURSOR_BRIDGE_IMAGE,
+        $context
+    )
+    $null = docker buildx version 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        docker buildx build --load @labels
+    } else {
+        docker build @labels
+    }
+    if ($LASTEXITCODE -ne 0) { throw 'Cursor Bridge 镜像构建失败' }
+}
+
+function Connect-CursorBridgeCpa {
+    $null = docker inspect $script:CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        warn "$($script:CONTAINER_NAME) 未运行，先 .\deploy.ps1 start，再挂 Cursor Bridge 网"
+        return
+    }
+    $networks = docker inspect $script:CONTAINER_NAME --format '{{json .NetworkSettings.Networks}}' 2>$null
+    if ("$networks" -like "*$($script:CURSOR_BRIDGE_NETWORK)*") { return }
+    docker network connect $script:CURSOR_BRIDGE_NETWORK $script:CONTAINER_NAME
+    if ($LASTEXITCODE -ne 0) { throw "无法把 $($script:CONTAINER_NAME) 挂到 $($script:CURSOR_BRIDGE_NETWORK)" }
+    info "已把 $($script:CONTAINER_NAME) 挂到 $($script:CURSOR_BRIDGE_NETWORK)"
+}
+
+function Ensure-CursorBridgeOpenaiCompatibility {
+    if (-not (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
+        warn '没有 config.yaml，跳过 openai-compatibility'
+        return
+    }
+    Assert-RegularFile $script:CONFIG_FILE
+    $config = Get-Content $script:CONFIG_FILE -Raw
+    if ($config -match '(?m)^\s*-\s*name:\s*cursor-bridge\s*$') {
+        info 'config.yaml 已有 cursor-bridge'
+        return
+    }
+    $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
+    if ($bridgeKey -notmatch '^[A-Fa-f0-9]{64}$') { return }
+    $backup = Join-Path $script:SCRIPT_DIR 'config.yaml.bak.cursor-bridge'
+    if (-not (Test-Path $backup)) {
+        Copy-Item $script:CONFIG_FILE $backup
+        Set-CursorBridgeEnvPermissions $backup
+    }
+    $item = @"
+
+  - name: cursor-bridge
+    prefix: cursor
+    base-url: http://cursor-bridge-guard:8080/v1
+    api-key-entries:
+      - api-key: "$bridgeKey"
+    models:
+      - name: auto
+        alias: cursor-auto
+"@
+    if ($config -notmatch '(?m)^\s*openai-compatibility:') {
+        $item = "`nopenai-compatibility:" + $item
+    }
+    Add-Content -Path $script:CONFIG_FILE -Value $item.TrimEnd() -Encoding utf8
+    warn '已追加 openai-compatibility。低峰运行 .\deploy.ps1 restart 才能加载（会短中断）'
+}
+
+function Start-CursorBridgeSidecarIfReady {
+    if (-not (Test-Path $script:CURSOR_BRIDGE_ENV_FILE -PathType Leaf)) { return }
+    try { Test-CursorBridgeEnvironment } catch {
+        detail '发现 cursor-bridge.env 但还缺 Cursor key。在终端执行: .\deploy.ps1 cursor-bridge'
+        return
+    }
+    info '检测到 cursor-bridge.env，同时启动 Cursor Bridge'
+    try { cmd-cursor-bridge-start } catch { warn "Cursor Bridge 启动失败，CPA 已在运行。可单独执行 .\deploy.ps1 cursor-bridge start" }
+}
+
+function cmd-cursor-bridge-init {
+    Require-CursorBridgeCompose
+    New-CursorBridgeEnvironment
+    $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
+    if ($bridgeKey -notmatch '^[A-Fa-f0-9]{64}$') {
+        Set-CursorBridgeEnvKey 'CURSOR_BRIDGE_API_KEY' (New-CryptoHex 32)
+        info '已自动生成 CURSOR_BRIDGE_API_KEY'
+    }
+    Request-CursorApiKey
+    Test-CursorBridgeEnvironment
+    info 'Cursor Bridge 已初始化。接下来: .\deploy.ps1 cursor-bridge start'
+}
+
+function cmd-cursor-bridge-build {
+    Require-CursorBridgeCompose
+    Test-CursorBridgeEnvironment
+    $null = docker image inspect $script:CURSOR_BRIDGE_IMAGE 2>$null
+    if ($LASTEXITCODE -eq 0) { docker rmi $script:CURSOR_BRIDGE_IMAGE 2>$null }
+    Ensure-CursorBridgeImage
+    info "已构建 $($script:CURSOR_BRIDGE_IMAGE)"
+}
+
+function cmd-cursor-bridge-configure {
+    Require-CursorBridgeCompose
+    New-CursorBridgeEnvironment
+    Request-CursorApiKey -Force
+    Ensure-CursorBridgeReady
+    $null = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Invoke-CursorBridgeCompose up -d
+        Connect-CursorBridgeCpa
+        info '已更换 Cursor key 并重建桥容器'
+    } else {
+        info '已更换 Cursor key。接下来: .\deploy.ps1 cursor-bridge start'
+    }
+}
+
+function cmd-cursor-bridge-start {
+    Require-CursorBridgeCompose
+    Ensure-CursorBridgeReady
+    Ensure-CursorBridgeImage
+    Invoke-CursorBridgeCompose config --quiet
+    Invoke-CursorBridgeCompose up -d
+    Connect-CursorBridgeCpa
+    Ensure-CursorBridgeOpenaiCompatibility
+    info 'Cursor Bridge 已启动（守卫 :8080，无主机端口）'
+}
+
+function cmd-cursor-bridge-stop {
+    Require-CursorBridgeCompose
+    Invoke-CursorBridgeCompose stop
+    info 'Cursor Bridge 已停止（未动 CPA）'
+}
+
+function cmd-cursor-bridge-restart {
+    Require-CursorBridgeCompose
+    Test-CursorBridgeEnvironment
+    Invoke-CursorBridgeCompose restart
+    Connect-CursorBridgeCpa
+    info 'Cursor Bridge 已重启'
+}
+
+function cmd-cursor-bridge-status {
+    Require-CursorBridgeCompose
+    Invoke-CursorBridgeCompose ps
+    $null = docker inspect $script:CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $networks = docker inspect $script:CONTAINER_NAME --format '{{json .NetworkSettings.Networks}}' 2>$null
+        if ("$networks" -like "*$($script:CURSOR_BRIDGE_NETWORK)*") {
+            info "$($script:CONTAINER_NAME) 已在 $($script:CURSOR_BRIDGE_NETWORK)"
+        } else {
+            warn "$($script:CONTAINER_NAME) 还没挂 $($script:CURSOR_BRIDGE_NETWORK)"
+        }
+    }
+}
+
+function cmd-cursor-bridge-logs($service = '') {
+    Require-CursorBridgeCompose
+    if ($service) { Invoke-CursorBridgeCompose logs -f --tail 200 $service }
+    else { Invoke-CursorBridgeCompose logs -f --tail 200 }
+}
+
+function cmd-cursor-bridge-doctor {
+    Require-CursorBridgeCompose
+    Test-CursorBridgeEnvironment
+    Invoke-CursorBridgeCompose config --quiet
+    $null = docker image inspect $script:CURSOR_BRIDGE_IMAGE 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "缺少钉死镜像 $($script:CURSOR_BRIDGE_IMAGE)" }
+    $user = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME --format '{{.Config.User}}' 2>$null
+    if ($user -ne 'app') { throw 'cursor-bridge 必须以 user=app 运行' }
+    $ports = "$(docker port $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null)$(docker port $script:CURSOR_BRIDGE_GUARD_CONTAINER_NAME 2>$null)"
+    if ($ports -like '*0.0.0.0:*') { throw '桥端口绑到了 0.0.0.0' }
+    $null = docker inspect $script:CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $networks = docker inspect $script:CONTAINER_NAME --format '{{json .NetworkSettings.Networks}}' 2>$null
+        if ("$networks" -notlike "*$($script:CURSOR_BRIDGE_NETWORK)*") {
+            throw "CPA 未挂 $($script:CURSOR_BRIDGE_NETWORK)"
+        }
+    }
+    $cursorKey = Get-CursorBridgeEnvValue 'CURSOR_API_KEY'
+    $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
+    $logs = "$(docker logs $script:CURSOR_BRIDGE_CONTAINER_NAME 2>&1)`n$(docker logs $script:CURSOR_BRIDGE_GUARD_CONTAINER_NAME 2>&1)"
+    if (($cursorKey -and $logs.Contains($cursorKey)) -or ($bridgeKey -and $logs.Contains($bridgeKey))) {
+        throw '日志里出现了 key'
+    }
+    info 'Cursor Bridge doctor PASS'
+    cmd-cursor-bridge-status
+}
+
+function cmd-cursor-bridge-uninstall {
+    Require-CursorBridgeCompose
+    $null = docker inspect $script:CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        docker network disconnect $script:CURSOR_BRIDGE_NETWORK $script:CONTAINER_NAME 2>$null
+    }
+    Invoke-CursorBridgeCompose down --remove-orphans
+    info 'Cursor Bridge 已卸载（未删 CPA 卷）'
+    detail '若已追加 openai-compatibility，请从 config.yaml 删掉 cursor-bridge 段后 .\deploy.ps1 restart'
+    if ((Test-Path $script:CURSOR_BRIDGE_ENV_FILE -PathType Leaf) -and (confirm-prompt '是否删除包含密钥的 cursor-bridge.env？' 'n')) {
+        Assert-RegularFile $script:CURSOR_BRIDGE_ENV_FILE
+        Remove-Item $script:CURSOR_BRIDGE_ENV_FILE -Force
+        info 'cursor-bridge.env 已删除'
+    }
+}
+
+function show-cursor-bridge-help {
+    Write-Host ''
+    Write-Host '  Cursor Bridge sidecar'
+    Write-Host '  .\deploy.ps1 cursor-bridge [action]' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '    start      缺 key 就提示输入，然后构建并启动（默认）' -ForegroundColor Cyan
+    Write-Host '    init       生成 env，提示输入一把 Cursor key' -ForegroundColor Cyan
+    Write-Host '    configure  更换 Cursor key，并重建桥容器' -ForegroundColor Cyan
+    Write-Host '    stop       停止桥，不动 CPA' -ForegroundColor Cyan
+    Write-Host '    restart    重启桥容器' -ForegroundColor Cyan
+    Write-Host '    status     查看桥和挂网状态' -ForegroundColor Cyan
+    Write-Host '    logs [服务] 查看日志' -ForegroundColor Cyan
+    Write-Host '    build      重新构建钉死镜像' -ForegroundColor Cyan
+    Write-Host '    doctor     检查钉死、端口、挂网、401' -ForegroundColor Cyan
+    Write-Host '    uninstall  拆桥；不删 CPA 卷' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  默认向导不会安装这座桥。执行 .\deploy.ps1 cursor-bridge，按提示粘贴一把 Cursor key。' -ForegroundColor DarkGray
+    Write-Host ''
+}
+
+function cmd-cursor-bridge {
+    param(
+        [Parameter(Position = 0)]
+        [string]$action = 'start',
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$remaining = @()
+    )
+    switch ($action) {
+        'start' { cmd-cursor-bridge-start }
+        'deploy' { cmd-cursor-bridge-start }
+        'init' { cmd-cursor-bridge-init }
+        'configure' { cmd-cursor-bridge-configure }
+        'build' { cmd-cursor-bridge-build }
+        'stop' { cmd-cursor-bridge-stop }
+        'restart' { cmd-cursor-bridge-restart }
+        'status' { cmd-cursor-bridge-status }
+        'logs' {
+            $service = if ($remaining.Count -gt 0) { $remaining[0] } else { '' }
+            cmd-cursor-bridge-logs $service
+        }
+        'doctor' { cmd-cursor-bridge-doctor }
+        'uninstall' { cmd-cursor-bridge-uninstall }
+        'help' { show-cursor-bridge-help }
+        '--help' { show-cursor-bridge-help }
+        '-h' { show-cursor-bridge-help }
+        default { error-msg "未知 Cursor Bridge 操作: $action"; show-cursor-bridge-help; exit 1 }
+    }
+}
+
 # ========================== 帮助信息 ==========================================
 
 function show-help {
@@ -3422,6 +3838,7 @@ function show-help {
     Write-Host '    uninstall    完全卸载' -ForegroundColor Cyan
     Write-Host '    setup-claude 自动配置 Claude Code 环境' -ForegroundColor Cyan
     Write-Host '    sub2api [操作] 管理独立的 Sub2API 一键部署' -ForegroundColor Cyan
+    Write-Host '    cursor-bridge [操作] 管理可选 Cursor Bridge sidecar' -ForegroundColor Cyan
     Write-Host '    help         显示此帮助' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  环境变量:'
@@ -3443,6 +3860,9 @@ function show-help {
     Write-Host ''
     Write-Host '    # 一键部署独立 Sub2API 栈' -ForegroundColor DarkGray
     Write-Host '    .\deploy.ps1 sub2api deploy'
+    Write-Host ''
+    Write-Host '    # 一键部署可选 Cursor Bridge sidecar（会提示输入一把 Cursor key）' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 cursor-bridge'
     Write-Host ''
 }
 
@@ -3505,6 +3925,11 @@ function main {
             [string[]]$sub2apiArgs = @()
             if ($args.Count -gt 1) { $sub2apiArgs = @($args[1..($args.Count - 1)]) }
             cmd-sub2api @sub2apiArgs
+        }
+        'cursor-bridge' {
+            [string[]]$cursorBridgeArgs = @()
+            if ($args.Count -gt 1) { $cursorBridgeArgs = @($args[1..($args.Count - 1)]) }
+            cmd-cursor-bridge @cursorBridgeArgs
         }
         'help'      { show-help }
         '--help'    { show-help }

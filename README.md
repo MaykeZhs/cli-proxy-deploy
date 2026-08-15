@@ -483,6 +483,15 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL="gemini-3-flash"
 | Sub2API 更新 / Update Sub2API | `bash deploy.sh sub2api update` | `.\deploy.ps1 sub2api update` |
 | Sub2API 自检 / Sub2API doctor | `bash deploy.sh sub2api doctor` | `.\deploy.ps1 sub2api doctor` |
 | Sub2API 卸载 / Uninstall Sub2API | `bash deploy.sh sub2api uninstall` | `.\deploy.ps1 sub2api uninstall` |
+| Cursor Bridge 一键部署 / Deploy Cursor Bridge | `bash deploy.sh cursor-bridge` | `.\deploy.ps1 cursor-bridge` |
+| Cursor Bridge 初始化 / Init Cursor Bridge | `bash deploy.sh cursor-bridge init` | `.\deploy.ps1 cursor-bridge init` |
+| Cursor Bridge 更换密钥 / Rekey Cursor Bridge | `bash deploy.sh cursor-bridge configure` | `.\deploy.ps1 cursor-bridge configure` |
+| Cursor Bridge 启动 / Start Cursor Bridge | `bash deploy.sh cursor-bridge start` | `.\deploy.ps1 cursor-bridge start` |
+| Cursor Bridge 停止 / Stop Cursor Bridge | `bash deploy.sh cursor-bridge stop` | `.\deploy.ps1 cursor-bridge stop` |
+| Cursor Bridge 状态 / Cursor Bridge status | `bash deploy.sh cursor-bridge status` | `.\deploy.ps1 cursor-bridge status` |
+| Cursor Bridge 日志 / Cursor Bridge logs | `bash deploy.sh cursor-bridge logs` | `.\deploy.ps1 cursor-bridge logs` |
+| Cursor Bridge 自检 / Cursor Bridge doctor | `bash deploy.sh cursor-bridge doctor` | `.\deploy.ps1 cursor-bridge doctor` |
+| Cursor Bridge 卸载 / Uninstall Cursor Bridge | `bash deploy.sh cursor-bridge uninstall` | `.\deploy.ps1 cursor-bridge uninstall` |
 | 完全卸载 / Full uninstall | `bash deploy.sh uninstall` | `.\deploy.ps1 uninstall` |
 | 配置 Claude Code / Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
 | 显示帮助 / Show help | `bash deploy.sh help` | `.\deploy.ps1 help` |

@@ -26,54 +26,40 @@ CPA 只连 `cpa-cursor-bridge`，解析得到守卫，**解析不到** `cursor-b
 - 不要多账号轮询、账号池、配额规避、`reset-hwid`、agent/plan/MCP、真实工作区
 - 不要接 CPAMP / Sub2API
 - 不要把 key 写进聊天、git、日志
-- 不要改 `deploy.sh` / `deploy.ps1` 默认向导（v1.1 再说）
+- 不要把 Cursor Bridge 加进默认一键向导（无参数的 `bash deploy.sh`）
 
-## 云端落地
+## 用脚本启动
 
-在**已经在跑 CPA 的那台 Linux 主机**、本仓库目录操作。
+默认向导（不带参数的 `bash deploy.sh`）**不会**装这座桥。和 Sub2API 一样，用子命令。脚本会自动生成 `CURSOR_BRIDGE_API_KEY`，你只需要粘贴一把 Cursor Dashboard key：
 
-### 1. 同步代码
+```bash
+# 第一次：提示输入一把 Cursor key，然后构建镜像、起守卫、挂到现网 CPA
+bash deploy.sh cursor-bridge
+# Windows: .\deploy.ps1 cursor-bridge
+```
+
+从 https://cursor.com/dashboard/api 创建 key，弹窗里复制完整 `crsr_...`。输入时不显示。不要复用 CPA 的 key，不要把 key 发到聊天。
+
+以后 `bash deploy.sh start` 也会在 env 已填好时顺带拉起桥并重新挂网。
+
+`start` 会：构建钉死镜像（没有才建）、起守卫、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时追加 `openai-compatibility`。追加配置后需要低峰 `bash deploy.sh restart` 才能加载。
+
+更换 Cursor key（会重建桥容器，不动 CPA 卷）：
+
+```bash
+bash deploy.sh cursor-bridge configure
+```
+
+## 云端落地（脚本）
+
+在**已经在跑 CPA 的那台主机**、本仓库目录：
 
 ```bash
 git pull
+bash deploy.sh cursor-bridge
+# 按提示粘贴一把 Cursor Dashboard key（输入不显示）
+bash deploy.sh cursor-bridge doctor
 ```
-
-确认有 `docker-compose.cursor-bridge.yml`、`cursor-bridge/nginx-guard.conf`、`cursor-bridge.env.example`。
-
-### 2. 打开 cursor-bridge.env 填两行
-
-```bash
-cp cursor-bridge.env.example cursor-bridge.env
-chmod 600 cursor-bridge.env
-```
-
-打开 `cursor-bridge.env` 填两行：
-
-- `CURSOR_API_KEY`：Cursor Dashboard https://cursor.com/dashboard/api ，弹窗里复制完整 `crsr_...`
-- `CURSOR_BRIDGE_API_KEY`：本机执行 `openssl rand -hex 32`，必须和上一把不同
-
-不要复用 `CPA_API_KEY` / `CPA_MANAGEMENT_KEY`。不要把 key 发到聊天里。`poc.env` 不用拷过来。
-
-### 3. 构建钉死镜像
-
-```bash
-docker buildx build --load \
-  --label org.opencontainers.image.source=https://github.com/anyrobert/cursor-api-proxy \
-  --label org.opencontainers.image.revision=c0ff1f941215027c0a8f658ca5d01f806559208f \
-  -t cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f \
-  https://github.com/anyrobert/cursor-api-proxy.git#c0ff1f941215027c0a8f658ca5d01f806559208f
-```
-
-禁止 `:latest`，禁止改 tag，禁止用别的 commit。
-
-### 4. 启动 sidecar（不动 CPA）
-
-```bash
-docker compose -f docker-compose.cursor-bridge.yml up -d
-docker network connect cpa-cursor-bridge cli-proxy-manager
-```
-
-如果提示 already connected，可以忽略。
 
 ### 5. 从 CPA 容器内打守卫（先不要改 config）
 
@@ -161,7 +147,7 @@ docker inspect cli-proxy-manager --format '{{.Name}} {{json .HostConfig.Binds}} 
 3. 只下桥，不要带 `--volumes`，不要动 CPA 的 compose：
 
 ```bash
-docker compose -f docker-compose.cursor-bridge.yml down --remove-orphans
+bash deploy.sh cursor-bridge uninstall
 ```
 
 4. 可选：`docker network disconnect cpa-cursor-bridge cli-proxy-manager`
@@ -172,11 +158,16 @@ docker compose -f docker-compose.cursor-bridge.yml down --remove-orphans
 
 | 动作 | 命令 |
 |---|---|
-| 看桥状态 | `docker compose -f docker-compose.cursor-bridge.yml ps` |
-| 看桥日志 | `docker compose -f docker-compose.cursor-bridge.yml logs --tail 200` |
-| 停桥 | `docker compose -f docker-compose.cursor-bridge.yml stop` |
-| 起桥 | `docker compose -f docker-compose.cursor-bridge.yml up -d` |
-| 拆桥 | `docker compose -f docker-compose.cursor-bridge.yml down --remove-orphans` |
+| 一键部署（提示输入一把 key） | `bash deploy.sh cursor-bridge` |
+| 初始化 | `bash deploy.sh cursor-bridge init` |
+| 更换 Cursor key | `bash deploy.sh cursor-bridge configure` |
+| 启动 | `bash deploy.sh cursor-bridge start` |
+| 停止 | `bash deploy.sh cursor-bridge stop` |
+| 重启 | `bash deploy.sh cursor-bridge restart` |
+| 状态 | `bash deploy.sh cursor-bridge status` |
+| 日志 | `bash deploy.sh cursor-bridge logs` |
+| 自检 | `bash deploy.sh cursor-bridge doctor` |
+| 拆桥 | `bash deploy.sh cursor-bridge uninstall` |
 
 日志里不应出现 Authorization、`crsr_`、两把 key、或 prompt 正文。
 
@@ -186,7 +177,7 @@ docker compose -f docker-compose.cursor-bridge.yml down --remove-orphans
 
 | 阶段 | 做什么 | 不做什么 |
 |---|---|---|
-| **v1.1** | `deploy.sh` / `deploy.ps1` 增加 cursor-bridge 的 start/stop/status/doctor | 改默认一键部署必装桥 |
+| **v1.1** | 已做：`cursor-bridge` 子命令；一键提示输入一把 Cursor key；`start` 在 env 就绪时顺带挂桥 | 改默认一键部署必装桥 |
 | **v2 补上游** | fork 或补丁：鉴权顺序、应用层 body/并发、钉死 Cursor CLI、密钥不进 `inspect` | 继续跟无 pin 的 `latest` |
 | **v2 产品** | 从 `/v1/models` 同步别名；按 300s 调 CPA 重试 | 对外卖 Cursor、公开 `/api/*` |
 | **以后** | 若官方提供真正的 OpenAI chat 上游，评估拆桥 | 多账号目录轮询、配额池、`reset-hwid`、agent/plan/MCP/真实工作区 |
