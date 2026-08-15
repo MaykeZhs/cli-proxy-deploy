@@ -83,6 +83,9 @@ not_contains "$ENV_EXAMPLE" 'latest' "Environment example must not use a latest 
 not_contains "$ENV_EXAMPLE" 'CURSOR_BRIDGE_POC_IMAGE' "Environment example must not define CURSOR_BRIDGE_POC_IMAGE"
 not_contains "$ENV_EXAMPLE" 'CPA_API_KEY=' "Environment example must not set CPA_API_KEY"
 
+if grep -Eq '^[[:space:]]*daemon[[:space:]]+' "$GUARD_CONF"; then
+  fail "Guard must not set daemon; the official image already passes -g daemon off"
+fi
 contains "$GUARD_CONF" 'client_max_body_size 8m' "Guard must cap body at 8m"
 contains "$GUARD_CONF" 'limit_conn cursor_bridge 1' "Guard must limit to 1 concurrent proxied connection"
 contains "$GUARD_CONF" 'proxy_read_timeout 300s' "Guard timeout must be at least 300s"
@@ -251,6 +254,10 @@ if "cursor-bridge-backend" not in guard_net_names:
     fail("guard must join cursor-bridge-backend")
 '
 
+contains "$ROOT_DIR/deploy.sh" 'docker compose -p "${CURSOR_BRIDGE_PROJECT_NAME}"' "deploy.sh must set the Compose project with -p"
+if awk '/^cursor_bridge_compose\(\)/,/^cursor_bridge_env_value\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'COMPOSE_PROJECT_NAME='; then
+  fail "cursor_bridge_compose must not assign readonly COMPOSE_PROJECT_NAME"
+fi
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge' "deploy.sh must dispatch cursor-bridge"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge' "deploy.ps1 must dispatch cursor-bridge"
 contains "$ROOT_DIR/deploy.sh" 'prompt_cursor_api_key' "deploy.sh must prompt for the Cursor key"

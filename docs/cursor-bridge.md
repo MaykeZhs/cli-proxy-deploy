@@ -42,7 +42,7 @@ bash deploy.sh cursor-bridge
 
 以后 `bash deploy.sh start` 也会在 env 已填好时顺带拉起桥并重新挂网。
 
-`start` 会：构建钉死镜像（没有才建）、起守卫、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时追加 `openai-compatibility`。追加配置后需要低峰 `bash deploy.sh restart` 才能加载。
+`start` 会：构建钉死镜像（没有才建）、起守卫、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时追加 `openai-compatibility`。第一次写入这段配置时，脚本会自己重启 CPA（几秒中断），不用再单独跑 `restart`。
 
 更换 Cursor key（会重建桥容器，不动 CPA 卷）：
 

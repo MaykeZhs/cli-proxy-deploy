@@ -3592,16 +3592,16 @@ function Connect-CursorBridgeCpa {
 function Ensure-CursorBridgeOpenaiCompatibility {
     if (-not (Test-Path $script:CONFIG_FILE -PathType Leaf)) {
         warn '没有 config.yaml，跳过 openai-compatibility'
-        return
+        return $false
     }
     Assert-RegularFile $script:CONFIG_FILE
     $config = Get-Content $script:CONFIG_FILE -Raw
     if ($config -match '(?m)^\s*-\s*name:\s*cursor-bridge\s*$') {
         info 'config.yaml 已有 cursor-bridge'
-        return
+        return $false
     }
     $bridgeKey = Get-CursorBridgeEnvValue 'CURSOR_BRIDGE_API_KEY'
-    if ($bridgeKey -notmatch '^[A-Fa-f0-9]{64}$') { return }
+    if ($bridgeKey -notmatch '^[A-Fa-f0-9]{64}$') { return $false }
     $backup = Join-Path $script:SCRIPT_DIR 'config.yaml.bak.cursor-bridge'
     if (-not (Test-Path $backup)) {
         Copy-Item $script:CONFIG_FILE $backup
@@ -3622,7 +3622,8 @@ function Ensure-CursorBridgeOpenaiCompatibility {
         $item = "`nopenai-compatibility:" + $item
     }
     Add-Content -Path $script:CONFIG_FILE -Value $item.TrimEnd() -Encoding utf8
-    warn '已追加 openai-compatibility。低峰运行 .\deploy.ps1 restart 才能加载（会短中断）'
+    info '已写入 config.yaml 的 cursor-bridge 上游'
+    return $true
 }
 
 function Start-CursorBridgeSidecarIfReady {
@@ -3679,8 +3680,12 @@ function cmd-cursor-bridge-start {
     Invoke-CursorBridgeCompose config --quiet
     Invoke-CursorBridgeCompose up -d
     Connect-CursorBridgeCpa
-    Ensure-CursorBridgeOpenaiCompatibility
-    info 'Cursor Bridge 已启动（守卫 :8080，无主机端口）'
+    $appended = Ensure-CursorBridgeOpenaiCompatibility
+    if ($appended) {
+        info '正在重启 CPA，让它读到 Cursor 上游（约几秒）'
+        try { cmd-restart } catch { warn 'CPA 重启失败，请稍后执行 .\deploy.ps1 restart' }
+    }
+    info 'Cursor Bridge 已启动。CPA 走守卫 :8080，桥本身无主机端口'
 }
 
 function cmd-cursor-bridge-stop {

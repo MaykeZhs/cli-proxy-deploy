@@ -3946,7 +3946,8 @@ cursor_bridge_ensure_openai_compatibility() {
     } > "${tmp}"
     mv "${tmp}" "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
-    warn "已追加 openai-compatibility。低峰运行 bash deploy.sh restart 才能加载（会短中断）"
+    info "已写入 config.yaml 的 cursor-bridge 上游"
+    return 2
 }
 
 maybe_start_cursor_bridge_sidecar() {
@@ -3998,8 +3999,15 @@ cmd_cursor_bridge_start() {
     cursor_bridge_compose config --quiet || { error "Cursor Bridge Compose 校验失败"; return 1; }
     cursor_bridge_compose up -d
     cursor_bridge_connect_cpa || true
-    cursor_bridge_ensure_openai_compatibility || true
-    info "Cursor Bridge 已启动（守卫 :8080，无主机端口）"
+    local compat_status=0
+    cursor_bridge_ensure_openai_compatibility || compat_status=$?
+    if [[ "${compat_status}" -eq 2 ]]; then
+        info "正在重启 CPA，让它读到 Cursor 上游（约几秒）"
+        cmd_restart || warn "CPA 重启失败，请稍后执行 bash deploy.sh restart"
+    elif [[ "${compat_status}" -ne 0 ]]; then
+        warn "写入 openai-compatibility 失败。可检查 config.yaml 后执行 bash deploy.sh restart"
+    fi
+    info "Cursor Bridge 已启动。CPA 走守卫 :8080，桥本身无主机端口"
 }
 
 cmd_cursor_bridge_stop() {
