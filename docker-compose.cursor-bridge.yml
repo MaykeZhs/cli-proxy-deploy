@@ -1,0 +1,125 @@
+# =============================================================================
+#  Optional Cursor Bridge sidecar for an already-running CLI Proxy Manager
+# =============================================================================
+#
+#  Do not replace or recreate cli-proxy-manager. Do not use docker-compose.yml
+#  down. Do not delete volume cli-proxy-manager-auth.
+#
+#  Build the pinned image once on the host (never an unpinned tag, never an override):
+#
+#    docker buildx build --load \
+#      --label org.opencontainers.image.source=https://github.com/anyrobert/cursor-api-proxy \
+#      --label org.opencontainers.image.revision=c0ff1f941215027c0a8f658ca5d01f806559208f \
+#      -t cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f \
+#      https://github.com/anyrobert/cursor-api-proxy.git#c0ff1f941215027c0a8f658ca5d01f806559208f
+#
+#  Then: docker compose -f docker-compose.cursor-bridge.yml up -d
+#  Then: docker network connect cpa-cursor-bridge cli-proxy-manager
+#
+# =============================================================================
+
+name: cursor-bridge
+
+services:
+  cursor-bridge:
+    image: cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f
+    pull_policy: never
+    container_name: cursor-bridge
+    user: app
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    env_file:
+      - cursor-bridge.env
+    environment:
+      CURSOR_BRIDGE_HOST: "0.0.0.0"
+      CURSOR_BRIDGE_PORT: "8765"
+      CURSOR_BRIDGE_DEFAULT_MODEL: auto
+      CURSOR_BRIDGE_TIMEOUT_MS: "300000"
+      CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE: "true"
+      CURSOR_BRIDGE_MODE: ask
+      CURSOR_BRIDGE_FORCE: "false"
+      CURSOR_BRIDGE_APPROVE_MCPS: "false"
+      CURSOR_BRIDGE_STRICT_MODEL: "true"
+      CURSOR_BRIDGE_VERBOSE: "false"
+      CURSOR_BRIDGE_MAX_MODE: "false"
+      CURSOR_BRIDGE_USE_ACP: "true"
+      CURSOR_BRIDGE_PROMPT_VIA_STDIN: "true"
+      CURSOR_BRIDGE_ACP_RAW_DEBUG: "false"
+      CURSOR_BRIDGE_CONTEXT_PREAMBLE: "true"
+      CURSOR_BRIDGE_MULTI_PORT: "false"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 2g
+    mem_reservation: 512m
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - cursor-bridge-backend
+    labels:
+      org.opencontainers.image.source: "https://github.com/anyrobert/cursor-api-proxy"
+      org.opencontainers.image.revision: "c0ff1f941215027c0a8f658ca5d01f806559208f"
+
+  cursor-bridge-guard:
+    image: nginx:1.28.0-alpine
+    container_name: cursor-bridge-guard
+    user: nginx
+    restart: unless-stopped
+    stop_grace_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    volumes:
+      - type: bind
+        source: ./cursor-bridge/nginx-guard.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: "0.25"
+    depends_on:
+      cursor-bridge:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/guard-health | grep -q ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - cpa-cursor-bridge
+      - cursor-bridge-backend
+
+networks:
+  cpa-cursor-bridge:
+    name: cpa-cursor-bridge
+    driver: bridge
+  cursor-bridge-backend:
+    name: cursor-bridge-backend
+    driver: bridge

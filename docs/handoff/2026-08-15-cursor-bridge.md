@@ -76,6 +76,10 @@ Invoke-RestMethod http://127.0.0.1:18765/v1/models -Headers $h
 
 停本机试验：`.\poc.ps1 stop` 或 `.\poc.ps1 destroy`（destroy 只下这个 Compose 项目）。
 
+## v1 文件已落地（2026-08-15）
+
+仓库里已经有 sidecar 文件。云主机 `git pull` 后按 [`docs/cursor-bridge.md`](../cursor-bridge.md) 操作。打开 `cursor-bridge.env` 填两行，不要把 key 发到聊天，不要拷 `poc.env`。
+
 ## 下一台电脑要做的（第一版实现）
 
 按设计文档从头做，**不要**把 Stage A 的 `poc/` 原样接到现网。

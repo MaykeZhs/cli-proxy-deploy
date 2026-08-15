@@ -5,6 +5,8 @@ config.yaml
 .env.*.local
 sub2api.env
 sub2api.env.tmp.*
+cursor-bridge.env
+cursor-bridge.env.tmp.*
 poc/cursor-bridge/poc.env
 poc/cursor-bridge/poc.env.tmp.*
 poc/cursor-bridge/poc-metadata.json

@@ -37,6 +37,8 @@
 
 实验性 Cursor → API 本地 POC（仅 loopback，不接线上 CPA）：[`poc/cursor-bridge/README.md`](poc/cursor-bridge/README.md)。
 
+可选云端 Cursor Bridge sidecar（不改现网 CPA 容器，经守卫接入）：[`docs/cursor-bridge.md`](docs/cursor-bridge.md)。
+
 ---
 
 ## 📋 前置要求 / Prerequisites
@@ -867,6 +869,9 @@ cli-proxy-deploy/
 ├── install.ps1            # 远程安装脚本 (Windows) / Remote installer (Windows)
 ├── docker-compose.yml     # 基础 Docker 编排 / Base Docker Compose
 ├── docker-compose.sub2api.yml # 独立 Sub2API stack / Isolated Sub2API stack
+├── docker-compose.cursor-bridge.yml # 可选 Cursor Bridge sidecar / Optional Cursor Bridge sidecar
+├── cursor-bridge.env.example # Cursor Bridge 非敏感模板 / Non-secret Cursor Bridge template
+├── cursor-bridge/         # 守卫配置 / Guard config
 ├── config.example.yaml    # 配置模板 / Config template
 ├── .env.example           # 可选环境变量示例 / Optional env example
 ├── sub2api.env.example    # Sub2API 非敏感模板 / Non-secret Sub2API template
@@ -1106,7 +1111,7 @@ $env:ANTHROPIC_AUTH_TOKEN = "your-api-key"
 
 ## 🔒 安全 / Security
 
-- `config.yaml`、`.env` 和 `sub2api.env` 包含本地密钥，已被 `.gitignore` 忽略。
+- `config.yaml`、`.env`、`sub2api.env` 和 `cursor-bridge.env` 包含本地密钥，已被 `.gitignore` 忽略。
 - OAuth 凭证保存在 Docker volume `cli-proxy-manager-auth` 中；`backup` 生成的归档也包含敏感信息，不要上传到公开仓库。
 - Sub2API 数据保存在三个 `sub2api-manager-*` volumes 中。删除 volumes 前先确认已有备份。
 - 发布截图、日志、README 示例时，不要包含真实 API key、OAuth 邮箱或凭证文件名。
@@ -1123,6 +1128,7 @@ See [SECURITY.md](SECURITY.md) for the full checklist.
 - Run `pwsh -NoProfile -Command "try { . .\deploy.ps1 } catch {}"` (syntax check).
 - Run `docker compose -f docker-compose.yml config --quiet`.
 - Run `docker compose --env-file sub2api.env.example -f docker-compose.sub2api.yml config --quiet`.
+- Run `bash tests/test-cursor-bridge-sidecar-contract.sh`.
 - Run `bash deploy.sh status` / `.\deploy.ps1 status` and confirm the API test returns `200`.
 - Test a fresh clone path before announcing the repo.
 
