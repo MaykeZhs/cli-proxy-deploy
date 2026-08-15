@@ -38,7 +38,6 @@ docker compose -f docker-compose.yml config --quiet
 | Setup Claude Code | `bash deploy.sh setup-claude` | `.\deploy.ps1 setup-claude` |
 | Cursor Bridge deploy | `bash deploy.sh cursor-bridge` | `.\deploy.ps1 cursor-bridge` |
 | Cursor Bridge sync models | `bash deploy.sh cursor-bridge sync-models` | `.\deploy.ps1 cursor-bridge sync-models` |
-| Cursor Bridge usage | `bash deploy.sh cursor-bridge usage` | `.\deploy.ps1 cursor-bridge usage` |
 
 Custom port: `CPA_PORT=9000 bash deploy.sh start` / `$env:CPA_PORT=9000; .\deploy.ps1 start`
 

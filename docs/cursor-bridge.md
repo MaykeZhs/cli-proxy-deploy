@@ -52,12 +52,6 @@ bash deploy.sh cursor-bridge sync-models
 
 脚本在桥容器里用 `CURSOR_BRIDGE_API_KEY` 拉列表，只改 `cursor-bridge` 的 `models:`，然后重启 CPA。`auto` 的别名仍是 `cursor-auto`，其它 id 原样当 alias。
 
-只读查 Cursor 套餐额度（不改账号、不打印 key）。若 Dashboard key 被拒绝，请打开官网：
-
-```bash
-bash deploy.sh cursor-bridge usage
-```
-
 更换 Cursor key（会重建桥容器，不动 CPA 卷）：
 
 ```bash
@@ -181,7 +175,6 @@ bash deploy.sh cursor-bridge uninstall
 | 自检 | `bash deploy.sh cursor-bridge doctor` |
 | 同步模型到 config.yaml | `bash deploy.sh cursor-bridge sync-models` |
 | 只同步部分模型 | `bash deploy.sh cursor-bridge sync-models auto,cursor-grok-4.6` |
-| 只读查套餐额度 | `bash deploy.sh cursor-bridge usage` |
 | 拆桥 | `bash deploy.sh cursor-bridge uninstall` |
 
 日志里不应出现 Authorization、`crsr_`、两把 key、或 prompt 正文。

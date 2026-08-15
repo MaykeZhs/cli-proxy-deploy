@@ -70,7 +70,6 @@ readonly CURSOR_BRIDGE_NETWORK="cpa-cursor-bridge"
 readonly CURSOR_BRIDGE_SOURCE_REPOSITORY="https://github.com/anyrobert/cursor-api-proxy"
 readonly CURSOR_BRIDGE_SOURCE_COMMIT="c0ff1f941215027c0a8f658ca5d01f806559208f"
 readonly CURSOR_BRIDGE_IMAGE="cursor-api-proxy:poc-c0ff1f941215027c0a8f658ca5d01f806559208f"
-readonly CURSOR_BRIDGE_USAGE_SCRIPT="${SCRIPT_DIR}/cursor-bridge/usage-readonly.js"
 readonly AUTO_UPDATE_LOG="${SCRIPT_DIR}/logs/auto-update.log"
 readonly FAILED_UPDATE_FILE="${SCRIPT_DIR}/logs/failed-update-digest"
 readonly AUTO_UPDATE_MARKER_BEGIN="# >>> cli-proxy-manager auto-update >>>"
@@ -4089,31 +4088,6 @@ cmd_cursor_bridge_sync_models() {
     cmd_restart || warn "CPA 重启失败，请稍后 bash deploy.sh restart"
 }
 
-cmd_cursor_bridge_usage() {
-    require_cursor_bridge_compose || return 1
-    validate_cursor_bridge_env || return 1
-    docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" >/dev/null 2>&1 || {
-        error "cursor-bridge 未运行，先 bash deploy.sh cursor-bridge"
-        return 1
-    }
-    info "只读查询 Cursor 套餐额度（不改账号、不打印 key）"
-    [[ -f "${CURSOR_BRIDGE_USAGE_SCRIPT}" ]] || {
-        error "缺少 ${CURSOR_BRIDGE_USAGE_SCRIPT}"
-        return 1
-    }
-    local rc
-    docker exec -i "${CURSOR_BRIDGE_CONTAINER_NAME}" node - < "${CURSOR_BRIDGE_USAGE_SCRIPT}"
-    rc=$?
-    if [[ "${rc}" -eq 2 ]]; then
-        warn "这把 Dashboard key 查不了账单接口。请打开 https://cursor.com/dashboard"
-        return 2
-    fi
-    if [[ "${rc}" -ne 0 ]]; then
-        error "只读额度查询失败"
-        return 1
-    fi
-}
-
 maybe_start_cursor_bridge_sidecar() {
     [[ -f "${CURSOR_BRIDGE_ENV_FILE}" ]] || return 0
     if ! validate_cursor_bridge_env >/dev/null 2>&1; then
@@ -4174,7 +4148,6 @@ cmd_cursor_bridge_start() {
     fi
     info "Cursor Bridge 已启动。CPA 直连 :8765，无主机端口"
     info "CPA 面板不会自己拉模型。同步列表: bash deploy.sh cursor-bridge sync-models"
-    info "只读查套餐额度: bash deploy.sh cursor-bridge usage"
 }
 
 cmd_cursor_bridge_stop() {
@@ -4272,7 +4245,6 @@ show_cursor_bridge_help() {
     echo -e "    ${CYAN}build${NC}      重新构建钉死镜像"
     echo -e "    ${CYAN}doctor${NC}     检查钉死、端口、挂网、401"
     echo -e "    ${CYAN}sync-models${NC} 从桥 /v1/models 写入 config.yaml（可跟 id 列表）"
-    echo -e "    ${CYAN}usage${NC}      只读查询 Cursor 套餐额度"
     echo -e "    ${CYAN}uninstall${NC}  拆桥；不删 CPA 卷"
     echo ""
     echo -e "  ${DIM}默认向导不会安装这座桥。执行 bash deploy.sh cursor-bridge，按提示粘贴一把 Cursor key。${NC}"
@@ -4285,11 +4257,7 @@ show_cursor_bridge_help() {
     echo -e "    ${DIM}脚本在桥容器里用已有 key 拉列表，只改 cursor-bridge 的 models:，然后重启 CPA。${NC}"
     echo -e "    ${DIM}auto 的别名仍是 cursor-auto；其它 id 原样当 alias。客户端继续用 CPA_API_KEY。${NC}"
     echo ""
-    echo -e "  ${BOLD}只读查套餐额度:${NC}"
-    echo -e "    bash deploy.sh cursor-bridge usage"
-    echo -e "    ${DIM}在桥容器里用已有 CURSOR_API_KEY 调 Cursor 账单接口。不改账号，不打印 key。${NC}"
-    echo -e "    ${DIM}若返回 401，这把 Dashboard key 查不了账单，请打开 cursor.com/dashboard。${NC}"
-    echo -e "    ${DIM}桥 HTTP 没有 /usage。chat 里的 usage 只是估算，不是 Cursor 账单。${NC}"
+    echo -e "  ${DIM}套餐额度请打开 cursor.com/dashboard。桥 HTTP 没有 /usage。chat 里的 usage 只是估算，不是 Cursor 账单。${NC}"
     echo ""
 }
 
@@ -4307,7 +4275,6 @@ cmd_cursor_bridge() {
         logs) cmd_cursor_bridge_logs "${1:-}" ;;
         doctor) cmd_cursor_bridge_doctor ;;
         sync-models|sync) cmd_cursor_bridge_sync_models "${1:-}" ;;
-        usage|quota) cmd_cursor_bridge_usage ;;
         uninstall) cmd_cursor_bridge_uninstall ;;
         help|--help|-h) show_cursor_bridge_help ;;
         *) error "未知 Cursor Bridge 操作: ${action}"; show_cursor_bridge_help; return 1 ;;
@@ -4374,8 +4341,6 @@ show_help() {
     echo -e "    bash deploy.sh cursor-bridge"
     echo -e "    ${DIM}# 把桥上的模型列表写入 config.yaml（CPA 面板不会自己拉）${NC}"
     echo -e "    bash deploy.sh cursor-bridge sync-models"
-    echo -e "    ${DIM}# 只读查询 Cursor 套餐额度${NC}"
-    echo -e "    bash deploy.sh cursor-bridge usage"
     echo ""
     echo -e "    ${DIM}# 启用每日自动更新（默认 04:20）${NC}"
     echo -e "    bash deploy.sh enable-auto-update"
