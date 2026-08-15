@@ -35,6 +35,8 @@
 | 🌉 可选 Sub2API 栈 / Optional Sub2API stack | 独立部署 Sub2API + PostgreSQL + Redis / Isolated Sub2API + PostgreSQL + Redis deployment |
 | 🪟 Windows 原生支持 / Windows native | PowerShell 部署脚本 / PowerShell deploy scripts |
 
+实验性 Cursor → API 本地 POC（仅 loopback，不接线上 CPA）：[`poc/cursor-bridge/README.md`](poc/cursor-bridge/README.md)。
+
 ---
 
 ## 📋 前置要求 / Prerequisites

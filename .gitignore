@@ -5,6 +5,10 @@ config.yaml
 .env.*.local
 sub2api.env
 sub2api.env.tmp.*
+poc/cursor-bridge/poc.env
+poc/cursor-bridge/poc.env.tmp.*
+poc/cursor-bridge/poc-metadata.json
+poc/cursor-bridge/poc-evidence/
 
 # OS files
 .DS_Store
