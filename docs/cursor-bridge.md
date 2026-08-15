@@ -43,6 +43,15 @@ bash deploy.sh cursor-bridge
 
 `start` 会：构建钉死镜像（没有才建）、起 `cursor-bridge`、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时把 `openai-compatibility` 指向 `http://cursor-bridge:8765/v1`。第一次写入或从旧守卫地址迁过时，脚本会自己重启 CPA（几秒中断）。
 
+CPA 面板不会自己拉桥上的 `/v1/models`。默认只写 `cursor-auto`。要把桥上的模型名写进 `config.yaml`：
+
+```bash
+bash deploy.sh cursor-bridge sync-models
+# 只要几个：bash deploy.sh cursor-bridge sync-models auto,cursor-grok-4.6
+```
+
+脚本在桥容器里用 `CURSOR_BRIDGE_API_KEY` 拉列表，只改 `cursor-bridge` 的 `models:`，然后重启 CPA。`auto` 的别名仍是 `cursor-auto`，其它 id 原样当 alias。
+
 更换 Cursor key（会重建桥容器，不动 CPA 卷）：
 
 ```bash
@@ -164,6 +173,8 @@ bash deploy.sh cursor-bridge uninstall
 | 状态 | `bash deploy.sh cursor-bridge status` |
 | 日志 | `bash deploy.sh cursor-bridge logs` |
 | 自检 | `bash deploy.sh cursor-bridge doctor` |
+| 同步模型到 config.yaml | `bash deploy.sh cursor-bridge sync-models` |
+| 只同步部分模型 | `bash deploy.sh cursor-bridge sync-models auto,cursor-grok-4.6` |
 | 拆桥 | `bash deploy.sh cursor-bridge uninstall` |
 
 日志里不应出现 Authorization、`crsr_`、两把 key、或 prompt 正文。
@@ -176,7 +187,8 @@ bash deploy.sh cursor-bridge uninstall
 |---|---|---|
 | **v1.1** | 已做：`cursor-bridge` 子命令；一键提示输入一把 Cursor key；`start` 在 env 就绪时顺带挂桥 | 改默认一键部署必装桥 |
 | **v2 补上游** | fork 或补丁：鉴权顺序、应用层 body/并发、钉死 Cursor CLI、密钥不进 `inspect` | 继续跟无 pin 的 `latest` |
-| **v2 产品** | 从 `/v1/models` 同步别名；按 300s 调 CPA 重试 | 对外卖 Cursor、公开 `/api/*` |
+| **v1.2** | 已做：`cursor-bridge sync-models` 把桥 `/v1/models` 写入 `config.yaml` | 指望 CPA 面板自己拉模型 |
+| **v2 产品** | 按 300s 调 CPA 重试 | 对外卖 Cursor、公开 `/api/*` |
 | **以后** | 若官方提供真正的 OpenAI chat 上游，评估拆桥 | 多账号目录轮询、配额池、`reset-hwid`、agent/plan/MCP/真实工作区 |
 
 v2 之前，上游仍是个人仓库、无根 LICENSE、镜像构建里 `curl | bash` 装 CLI。第一版能用，不能当付费公网产品。

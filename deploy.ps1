@@ -3696,6 +3696,7 @@ function cmd-cursor-bridge-start {
         try { cmd-restart } catch { warn 'CPA 重启失败，请稍后执行 .\deploy.ps1 restart' }
     }
     info 'Cursor Bridge 已启动。CPA 直连 :8765，无主机端口'
+    info 'CPA 面板不会自己拉模型。同步列表: .\deploy.ps1 cursor-bridge sync-models'
 }
 
 function cmd-cursor-bridge-stop {
@@ -3759,6 +3760,89 @@ function cmd-cursor-bridge-doctor {
     cmd-cursor-bridge-status
 }
 
+function cmd-cursor-bridge-sync-models {
+    param([string]$only = '')
+    Require-CursorBridgeCompose
+    Test-CursorBridgeEnvironment
+    Assert-RegularFile $script:CONFIG_FILE
+    $config = Get-Content $script:CONFIG_FILE -Raw
+    if ($config -notmatch '(?m)^\s*-\s*name:\s*cursor-bridge\s*$') {
+        throw 'config.yaml 还没有 cursor-bridge。先 .\deploy.ps1 cursor-bridge'
+    }
+    $null = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'cursor-bridge 未运行，先 .\deploy.ps1 cursor-bridge' }
+    $jsonText = docker exec $script:CURSOR_BRIDGE_CONTAINER_NAME sh -c 'curl -sS -H "Authorization: Bearer ${CURSOR_BRIDGE_API_KEY}" http://127.0.0.1:8765/v1/models'
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($jsonText)) { throw '无法从桥拉取 /v1/models' }
+    $payload = $jsonText | ConvertFrom-Json
+    if (-not ($payload.PSObject.Properties.Name -contains 'data')) { throw '桥返回的不是模型列表' }
+    $allow = @()
+    if ($only) { $allow = @($only.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    $ids = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($item in @($payload.data)) {
+        $mid = [string]$item.id
+        if ($mid -notmatch '^[A-Za-z0-9._:-]+$') { continue }
+        if ($allow.Count -gt 0 -and $allow -notcontains $mid) { continue }
+        if ($seen.ContainsKey($mid)) { continue }
+        $seen[$mid] = $true
+        [void]$ids.Add($mid)
+    }
+    $rest = @($ids | Where-Object { $_ -ne 'auto' })
+    $ordered = @('auto') + $rest
+    $block = New-Object System.Collections.Generic.List[string]
+    [void]$block.Add('    models:')
+    foreach ($mid in $ordered) {
+        $alias = if ($mid -eq 'auto') { 'cursor-auto' } else { $mid }
+        [void]$block.Add("      - name: $mid")
+        [void]$block.Add("        alias: $alias")
+    }
+    $src = Get-Content $script:CONFIG_FILE
+    $out = New-Object System.Collections.Generic.List[string]
+    $found = $false
+    $i = 0
+    while ($i -lt $src.Count) {
+        $line = $src[$i]
+        if ($line -match '^\s*-\s*name:\s*cursor-bridge\s*$') {
+            $found = $true
+            [void]$out.Add($line)
+            $i++
+            $inserted = $false
+            while ($i -lt $src.Count) {
+                $nxt = $src[$i]
+                if ($nxt -match '^\s*models:\s*$') {
+                    $i++
+                    while ($i -lt $src.Count -and ($src[$i].StartsWith('      ') -or [string]::IsNullOrWhiteSpace($src[$i]))) { $i++ }
+                    foreach ($row in $block) { [void]$out.Add($row) }
+                    $inserted = $true
+                    break
+                }
+                if ($nxt -match '^  - ' -or $nxt -match '^[A-Za-z]') {
+                    foreach ($row in $block) { [void]$out.Add($row) }
+                    $inserted = $true
+                    break
+                }
+                [void]$out.Add($nxt)
+                $i++
+            }
+            if (-not $inserted) { foreach ($row in $block) { [void]$out.Add($row) } }
+            continue
+        }
+        [void]$out.Add($line)
+        $i++
+    }
+    if (-not $found) { throw 'config.yaml 里没有 cursor-bridge 段' }
+    $backup = Join-Path $script:SCRIPT_DIR 'config.yaml.bak.cursor-bridge'
+    if (-not (Test-Path $backup)) {
+        Copy-Item $script:CONFIG_FILE $backup
+        Set-CursorBridgeEnvPermissions $backup
+    }
+    Set-Content -Path $script:CONFIG_FILE -Value $out -Encoding utf8
+    Set-CursorBridgeEnvPermissions $script:CONFIG_FILE
+    info "已把桥上 $($ordered.Count) 个模型写入 config.yaml（auto 仍叫 cursor-auto）"
+    info '正在重启 CPA，让面板读到新列表（约几秒）'
+    try { cmd-restart } catch { warn 'CPA 重启失败，请稍后执行 .\deploy.ps1 restart' }
+}
+
 function cmd-cursor-bridge-uninstall {
     Require-CursorBridgeCompose
     $null = docker inspect $script:CONTAINER_NAME 2>$null
@@ -3789,9 +3873,20 @@ function show-cursor-bridge-help {
     Write-Host '    logs [服务] 查看日志' -ForegroundColor Cyan
     Write-Host '    build      重新构建钉死镜像' -ForegroundColor Cyan
     Write-Host '    doctor     检查钉死、端口、挂网、401' -ForegroundColor Cyan
+    Write-Host '    sync-models 从桥 /v1/models 写入 config.yaml（可跟 id 列表）' -ForegroundColor Cyan
     Write-Host '    uninstall  拆桥；不删 CPA 卷' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  默认向导不会安装这座桥。执行 .\deploy.ps1 cursor-bridge，按提示粘贴一把 Cursor key。' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  把桥上的模型写进 config.yaml:'
+    Write-Host '    CPA 面板不会自己拉 /v1/models。默认只有 cursor-auto。' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 cursor-bridge sync-models'
+    Write-Host '    # 只要几个模型' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 cursor-bridge sync-models auto,cursor-grok-4.6'
+    Write-Host '    脚本在桥容器里用已有 key 拉列表，只改 cursor-bridge 的 models:，然后重启 CPA。' -ForegroundColor DarkGray
+    Write-Host '    auto 的别名仍是 cursor-auto；其它 id 原样当 alias。客户端继续用 CPA_API_KEY。' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  套餐额度：桥 HTTP 没有 /usage。chat 里的 usage 只是估算，不是 Cursor 账单。看额度请打开 cursor.com/dashboard。' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -3816,6 +3911,14 @@ function cmd-cursor-bridge {
             cmd-cursor-bridge-logs $service
         }
         'doctor' { cmd-cursor-bridge-doctor }
+        'sync-models' {
+            $only = if ($remaining.Count -gt 0) { $remaining[0] } else { '' }
+            cmd-cursor-bridge-sync-models $only
+        }
+        'sync' {
+            $only = if ($remaining.Count -gt 0) { $remaining[0] } else { '' }
+            cmd-cursor-bridge-sync-models $only
+        }
         'uninstall' { cmd-cursor-bridge-uninstall }
         'help' { show-cursor-bridge-help }
         '--help' { show-cursor-bridge-help }
@@ -3878,6 +3981,8 @@ function show-help {
     Write-Host ''
     Write-Host '    # 一键部署可选 Cursor Bridge sidecar（会提示输入一把 Cursor key）' -ForegroundColor DarkGray
     Write-Host '    .\deploy.ps1 cursor-bridge'
+    Write-Host '    # 把桥上的模型列表写入 config.yaml（CPA 面板不会自己拉）' -ForegroundColor DarkGray
+    Write-Host '    .\deploy.ps1 cursor-bridge sync-models'
     Write-Host ''
 }
 

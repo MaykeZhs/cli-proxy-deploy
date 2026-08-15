@@ -221,6 +221,12 @@ contains "$ROOT_DIR/deploy.sh" 'read -rs key' "deploy.sh must hide Cursor key in
 contains "$ROOT_DIR/deploy.ps1" 'Read-Host -AsSecureString' "deploy.ps1 must hide Cursor key input"
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_configure' "deploy.sh must support cursor-bridge configure"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-configure' "deploy.ps1 must support cursor-bridge configure"
+contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_sync_models' "deploy.sh must support cursor-bridge sync-models"
+contains "$ROOT_DIR/deploy.sh" 'bash deploy.sh cursor-bridge sync-models' "deploy.sh help must teach sync-models"
+contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-sync-models' "deploy.ps1 must support cursor-bridge sync-models"
+if awk '/^cmd_cursor_bridge_sync_models\(\)/,/^maybe_start_cursor_bridge_sidecar\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'echo .*CURSOR_|cat .*cursor-bridge.env'; then
+  fail "sync-models must not print keys"
+fi
 contains "$ROOT_DIR/deploy.sh" "CURSOR_BRIDGE_IMAGE=\"$EXPECTED_IMAGE\"" "deploy.sh must pin CURSOR_BRIDGE_IMAGE"
 contains "$ROOT_DIR/deploy.ps1" "CURSOR_BRIDGE_IMAGE            = '$EXPECTED_IMAGE'" "deploy.ps1 must pin CURSOR_BRIDGE_IMAGE"
 grep -Eq '^[[:space:]]*""[[:space:]]*\)[[:space:]]*cmd_deploy' "$ROOT_DIR/deploy.sh" || fail "deploy.sh default wizard must stay cmd_deploy"

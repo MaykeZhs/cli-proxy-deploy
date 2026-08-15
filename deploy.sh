@@ -3960,6 +3960,134 @@ cursor_bridge_ensure_openai_compatibility() {
     return 2
 }
 
+cursor_bridge_fetch_models_json() {
+    local out_file="$1"
+    docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" >/dev/null 2>&1 || {
+        error "cursor-bridge 未运行，先 bash deploy.sh cursor-bridge"
+        return 1
+    }
+    docker exec "${CURSOR_BRIDGE_CONTAINER_NAME}" \
+        sh -c 'curl -sS -H "Authorization: Bearer ${CURSOR_BRIDGE_API_KEY}" http://127.0.0.1:8765/v1/models' \
+        > "${out_file}" || {
+        error "无法从桥拉取 /v1/models"
+        return 1
+    }
+}
+
+cursor_bridge_write_models_from_json() {
+    local json_file="$1" out_file="$2" only="${3:-}"
+    if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+        error "sync-models 需要 python3"
+        return 1
+    fi
+    local py
+    py="$(command -v python3 || command -v python)"
+    "${py}" - "${json_file}" "${CONFIG_FILE}" "${out_file}" "${only}" <<'PY'
+import json, re, sys
+
+json_path, config_path, out_path = sys.argv[1:4]
+only = sys.argv[4].strip() if len(sys.argv) > 4 else ""
+allow = {x.strip() for x in only.split(",") if x.strip()} if only else None
+payload = json.load(open(json_path, encoding="utf-8"))
+if not isinstance(payload, dict) or "data" not in payload:
+    sys.stderr.write("桥返回的不是模型列表\n")
+    sys.exit(1)
+ids = []
+seen = set()
+for item in payload.get("data") or []:
+    mid = item.get("id") if isinstance(item, dict) else None
+    if not mid or not re.fullmatch(r"[A-Za-z0-9._:-]+", str(mid)):
+        continue
+    if allow is not None and mid not in allow:
+        continue
+    if mid in seen:
+        continue
+    seen.add(mid)
+    ids.append(mid)
+if "auto" not in seen:
+    ids.insert(0, "auto")
+elif ids and ids[0] != "auto":
+    ids = ["auto"] + [i for i in ids if i != "auto"]
+
+block = ["    models:\n"]
+for mid in ids:
+    alias = "cursor-auto" if mid == "auto" else mid
+    block.append("      - name: %s\n" % mid)
+    block.append("        alias: %s\n" % alias)
+models_block = "".join(block)
+
+src = open(config_path, encoding="utf-8").read().splitlines(True)
+out = []
+i = 0
+found = False
+while i < len(src):
+    line = src[i]
+    if re.match(r"^[ \t]*-[ \t]*name:[ \t]*cursor-bridge[ \t]*$", line):
+        found = True
+        out.append(line)
+        i += 1
+        inserted = False
+        while i < len(src):
+            nxt = src[i]
+            if re.match(r"^[ \t]*models:[ \t]*$", nxt):
+                i += 1
+                while i < len(src) and (src[i].startswith("      ") or src[i].strip() == ""):
+                    i += 1
+                out.append(models_block)
+                inserted = True
+                break
+            if re.match(r"^  - ", nxt) or re.match(r"^[A-Za-z]", nxt):
+                out.append(models_block)
+                inserted = True
+                break
+            out.append(nxt)
+            i += 1
+        if not inserted:
+            out.append(models_block)
+        continue
+    out.append(line)
+    i += 1
+if not found:
+    sys.stderr.write("config.yaml 里没有 cursor-bridge 段\n")
+    sys.exit(1)
+open(out_path, "w", encoding="utf-8").writelines(out)
+print(len(ids))
+PY
+}
+
+cmd_cursor_bridge_sync_models() {
+    local only="${1:-}"
+    require_cursor_bridge_compose || return 1
+    validate_cursor_bridge_env || return 1
+    assert_regular_file "${CONFIG_FILE}" || return 1
+    grep -Eq '^[[:space:]]*-[[:space:]]*name:[[:space:]]*cursor-bridge[[:space:]]*$' "${CONFIG_FILE}" || {
+        error "config.yaml 还没有 cursor-bridge。先 bash deploy.sh cursor-bridge"
+        return 1
+    }
+    local json_file tmp count backup
+    json_file="$(umask 077; mktemp "${SCRIPT_DIR}/cursor-bridge.models.json.XXXXXX")" || return 1
+    tmp="$(umask 077; mktemp "${SCRIPT_DIR}/config.yaml.tmp.XXXXXX")" || { rm -f "${json_file}"; return 1; }
+    if ! cursor_bridge_fetch_models_json "${json_file}"; then
+        rm -f "${json_file}" "${tmp}"
+        return 1
+    fi
+    count="$(cursor_bridge_write_models_from_json "${json_file}" "${tmp}" "${only}")" || {
+        rm -f "${json_file}" "${tmp}"
+        return 1
+    }
+    backup="${SCRIPT_DIR}/config.yaml.bak.cursor-bridge"
+    if [[ ! -e "${backup}" ]]; then
+        cp "${CONFIG_FILE}" "${backup}"
+        chmod 600 "${backup}" 2>/dev/null || true
+    fi
+    mv "${tmp}" "${CONFIG_FILE}"
+    chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+    rm -f "${json_file}"
+    info "已把桥上 ${count} 个模型写入 config.yaml（auto 仍叫 cursor-auto）"
+    info "正在重启 CPA，让面板读到新列表（约几秒）"
+    cmd_restart || warn "CPA 重启失败，请稍后 bash deploy.sh restart"
+}
+
 maybe_start_cursor_bridge_sidecar() {
     [[ -f "${CURSOR_BRIDGE_ENV_FILE}" ]] || return 0
     if ! validate_cursor_bridge_env >/dev/null 2>&1; then
@@ -4019,6 +4147,7 @@ cmd_cursor_bridge_start() {
         warn "写入 openai-compatibility 失败。可检查 config.yaml 后执行 bash deploy.sh restart"
     fi
     info "Cursor Bridge 已启动。CPA 直连 :8765，无主机端口"
+    info "CPA 面板不会自己拉模型。同步列表: bash deploy.sh cursor-bridge sync-models"
 }
 
 cmd_cursor_bridge_stop() {
@@ -4115,9 +4244,20 @@ show_cursor_bridge_help() {
     echo -e "    ${CYAN}logs [服务]${NC} 查看日志"
     echo -e "    ${CYAN}build${NC}      重新构建钉死镜像"
     echo -e "    ${CYAN}doctor${NC}     检查钉死、端口、挂网、401"
+    echo -e "    ${CYAN}sync-models${NC} 从桥 /v1/models 写入 config.yaml（可跟 id 列表）"
     echo -e "    ${CYAN}uninstall${NC}  拆桥；不删 CPA 卷"
     echo ""
     echo -e "  ${DIM}默认向导不会安装这座桥。执行 bash deploy.sh cursor-bridge，按提示粘贴一把 Cursor key。${NC}"
+    echo ""
+    echo -e "  ${BOLD}把桥上的模型写进 config.yaml:${NC}"
+    echo -e "    ${DIM}CPA 面板不会自己拉 /v1/models。默认只有 cursor-auto。${NC}"
+    echo -e "    bash deploy.sh cursor-bridge sync-models"
+    echo -e "    ${DIM}# 只要几个模型${NC}"
+    echo -e "    bash deploy.sh cursor-bridge sync-models auto,cursor-grok-4.6"
+    echo -e "    ${DIM}脚本在桥容器里用已有 key 拉列表，只改 cursor-bridge 的 models:，然后重启 CPA。${NC}"
+    echo -e "    ${DIM}auto 的别名仍是 cursor-auto；其它 id 原样当 alias。客户端继续用 CPA_API_KEY。${NC}"
+    echo ""
+    echo -e "  ${DIM}套餐额度：桥 HTTP 没有 /usage。chat 里的 usage 只是估算，不是 Cursor 账单。看额度请打开 cursor.com/dashboard。${NC}"
     echo ""
 }
 
@@ -4134,6 +4274,7 @@ cmd_cursor_bridge() {
         status) cmd_cursor_bridge_status ;;
         logs) cmd_cursor_bridge_logs "${1:-}" ;;
         doctor) cmd_cursor_bridge_doctor ;;
+        sync-models|sync) cmd_cursor_bridge_sync_models "${1:-}" ;;
         uninstall) cmd_cursor_bridge_uninstall ;;
         help|--help|-h) show_cursor_bridge_help ;;
         *) error "未知 Cursor Bridge 操作: ${action}"; show_cursor_bridge_help; return 1 ;;
@@ -4198,6 +4339,8 @@ show_help() {
     echo ""
     echo -e "    ${DIM}# 一键部署可选 Cursor Bridge sidecar（会提示输入一把 Cursor key）${NC}"
     echo -e "    bash deploy.sh cursor-bridge"
+    echo -e "    ${DIM}# 把桥上的模型列表写入 config.yaml（CPA 面板不会自己拉）${NC}"
+    echo -e "    bash deploy.sh cursor-bridge sync-models"
     echo ""
     echo -e "    ${DIM}# 启用每日自动更新（默认 04:20）${NC}"
     echo -e "    bash deploy.sh enable-auto-update"
