@@ -47,3 +47,4 @@ tmp/
 .playwright-mcp/
 .claude/*
 !.claude/settings.json
+.serena/
