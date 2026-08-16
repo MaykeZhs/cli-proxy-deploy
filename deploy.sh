@@ -1868,8 +1868,12 @@ wait_for_service_health() {
 
 recreate_service() {
     cd "${SCRIPT_DIR}"
+    local rc
     CPA_PORT="${CPA_PORT}" CPA_IMAGE="${DOCKER_IMAGE}" CPA_PULL_POLICY=never \
         $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d --force-recreate
+    rc=$?
+    maybe_start_cursor_bridge_sidecar || true
+    return "${rc}"
 }
 
 

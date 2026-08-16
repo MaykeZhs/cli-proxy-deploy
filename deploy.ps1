@@ -1674,6 +1674,9 @@ function Invoke-ServiceRecreate {
         $output = Invoke-Compose -f $script:COMPOSE_FILE up -d --force-recreate 2>&1
         $composeExitCode = $LASTEXITCODE
         if ($output) { detail ([string]($output | Select-Object -Last 1)) }
+        if ($composeExitCode -eq 0) {
+            try { Start-CursorBridgeSidecarIfReady } catch { }
+        }
         return $composeExitCode -eq 0
     } catch {
         detail $_.Exception.Message
