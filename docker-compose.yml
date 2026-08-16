@@ -27,7 +27,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - default
+      - cpa-cursor-bridge
 
 volumes:
   cpa-auth:
     name: cli-proxy-manager-auth
+
+networks:
+  cpa-cursor-bridge:
+    name: cpa-cursor-bridge

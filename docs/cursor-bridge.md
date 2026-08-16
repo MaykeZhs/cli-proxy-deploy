@@ -43,6 +43,8 @@ bash deploy.sh cursor-bridge
 
 `start` 会：构建钉死镜像（没有才建）、起 `cursor-bridge`、把现网 `cli-proxy-manager` 挂到 `cpa-cursor-bridge`、必要时把 `openai-compatibility` 指向 `http://cursor-bridge:8765/v1`。第一次写入或从旧守卫地址迁过时，脚本会自己重启 CPA（几秒中断）。
 
+主 `docker-compose.yml` 也会把 CPA 挂在同名网 `cpa-cursor-bridge` 上。所以 `update` / auto-update / `--force-recreate` 之后，CPA 仍能解析 `cursor-bridge`。只跑 `docker restart` 不够套用这份 compose 变更，需要一次 `bash deploy.sh start` 或 `docker compose up -d`。
+
 CPA 面板不会自己拉桥上的 `/v1/models`。默认只写 `cursor-auto`。要把桥上的模型名写进 `config.yaml`：
 
 ```bash
