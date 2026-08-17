@@ -64,7 +64,8 @@ not_contains "$COMPOSE_FILE" 'cursor-bridge-backend' "Compose must not keep the 
 not_contains "$COMPOSE_FILE" 'nginx' "Compose must not use nginx"
 contains "$COMPOSE_FILE" 'pull_policy: never' "Bridge must set pull_policy: never"
 contains "$COMPOSE_FILE" 'user: app' "Bridge must run as user app"
-contains "$COMPOSE_FILE" 'name: cpa-cursor-bridge' "Must create named network cpa-cursor-bridge"
+contains "$COMPOSE_FILE" 'name: cpa-cursor-bridge' "Must use named network cpa-cursor-bridge"
+contains "$COMPOSE_FILE" 'external: true' "Sidecar network must be external so CPA compose cannot delete it"
 contains "$COMPOSE_FILE" "$SOURCE_COMMIT" "Compose must record the pinned commit"
 contains "$COMPOSE_FILE" "$SOURCE_REPOSITORY" "Compose must record the upstream repository"
 
@@ -193,6 +194,9 @@ if cpa_net is None:
     fail("named network cpa-cursor-bridge is required")
 if cpa_net.get("internal") is True:
     fail("sidecar network must not be internal")
+ext = cpa_net.get("external")
+if ext is not True and not (isinstance(ext, dict) and ext):
+    fail("cpa-cursor-bridge must be external so compose cannot delete it")
 
 bridge_nets = set((bridge.get("networks") or {}).keys()) if isinstance(bridge.get("networks"), dict) else set(bridge.get("networks") or [])
 
@@ -212,6 +216,16 @@ contains "$ROOT_DIR/deploy.sh" 'docker compose -p "${CURSOR_BRIDGE_PROJECT_NAME}
 if awk '/^cursor_bridge_compose\(\)/,/^cursor_bridge_env_value\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'COMPOSE_PROJECT_NAME='; then
   fail "cursor_bridge_compose must not assign readonly COMPOSE_PROJECT_NAME"
 fi
+contains "$ROOT_DIR/docker-compose.yml" 'name: cpa-cursor-bridge' "main compose must keep CPA on cpa-cursor-bridge across recreate"
+contains "$ROOT_DIR/docker-compose.yml" '- cpa-cursor-bridge' "main compose must attach cliproxyapi to cpa-cursor-bridge"
+contains "$ROOT_DIR/docker-compose.yml" 'external: true' "main compose must treat cpa-cursor-bridge as external"
+contains "$ROOT_DIR/deploy.sh" 'ensure_cpa_cursor_bridge_network' "deploy.sh must create the shared network before compose up"
+contains "$ROOT_DIR/deploy.sh" 'ensure_cpa_running_after_update_failure' "deploy.sh must start CPA again if update leaves it down"
+contains "$ROOT_DIR/deploy.ps1" 'Ensure-CpaCursorBridgeNetwork' "deploy.ps1 must create the shared network before compose up"
+contains "$ROOT_DIR/deploy.ps1" 'Ensure-CpaRunningAfterUpdateFailure' "deploy.ps1 must start CPA again if update leaves it down"
+if awk '/^transactional_update\(\)/,/^shell_quote\(\)/' "$ROOT_DIR/deploy.sh" | grep -Fq 'recreate_service 2>&1 | tail -1'; then
+  fail "transactional_update must not hide recreate errors with tail -1"
+fi
 contains "$ROOT_DIR/deploy.sh" 'http://cursor-bridge:8765/v1' "deploy.sh must point CPA at cursor-bridge:8765"
 contains "$ROOT_DIR/deploy.ps1" 'http://cursor-bridge:8765/v1' "deploy.ps1 must point CPA at cursor-bridge:8765"
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge' "deploy.sh must dispatch cursor-bridge"
@@ -222,6 +236,12 @@ contains "$ROOT_DIR/deploy.ps1" 'Read-Host -AsSecureString' "deploy.ps1 must hid
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_configure' "deploy.sh must support cursor-bridge configure"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-configure' "deploy.ps1 must support cursor-bridge configure"
 contains "$ROOT_DIR/deploy.sh" 'cmd_cursor_bridge_sync_models' "deploy.sh must support cursor-bridge sync-models"
+if ! awk '/^recreate_service\(\)/,/^rollback_saved_image\(\)/' "$ROOT_DIR/deploy.sh" | grep -Fq 'maybe_start_cursor_bridge_sidecar'; then
+  fail "recreate_service must reattach Cursor Bridge after CPA recreate"
+fi
+if ! awk '/function Invoke-ServiceRecreate/,/function Invoke-SavedImageRollback/' "$ROOT_DIR/deploy.ps1" | grep -Fq 'Start-CursorBridgeSidecarIfReady'; then
+  fail "Invoke-ServiceRecreate must reattach Cursor Bridge after CPA recreate"
+fi
 contains "$ROOT_DIR/deploy.sh" 'bash deploy.sh cursor-bridge sync-models' "deploy.sh help must teach sync-models"
 contains "$ROOT_DIR/deploy.ps1" 'cmd-cursor-bridge-sync-models' "deploy.ps1 must support cursor-bridge sync-models"
 if awk '/^cmd_cursor_bridge_sync_models\(\)/,/^maybe_start_cursor_bridge_sidecar\(\)/' "$ROOT_DIR/deploy.sh" | grep -Eq 'echo .*CURSOR_|cat .*cursor-bridge.env'; then

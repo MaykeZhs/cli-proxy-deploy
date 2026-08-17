@@ -66,6 +66,7 @@ services:
       org.opencontainers.image.revision: "c0ff1f941215027c0a8f658ca5d01f806559208f"
 
 networks:
+  # Shared with docker-compose.yml. Neither project owns this network.
   cpa-cursor-bridge:
     name: cpa-cursor-bridge
-    driver: bridge
+    external: true

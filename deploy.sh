@@ -1866,13 +1866,36 @@ wait_for_service_health() {
     return 1
 }
 
+ensure_cpa_cursor_bridge_network() {
+    if docker network inspect "${CURSOR_BRIDGE_NETWORK}" >/dev/null 2>&1; then
+        return 0
+    fi
+    docker network create --driver bridge "${CURSOR_BRIDGE_NETWORK}" >/dev/null
+}
+
+ensure_cpa_running_after_update_failure() {
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+        return 0
+    fi
+    if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+        warn "更新失败后未找到 ${CONTAINER_NAME}，无法自动拉起"
+        return 1
+    fi
+    warn "更新失败，正在拉起已有 ${CONTAINER_NAME}，避免服务停机"
+    docker start "${CONTAINER_NAME}" >/dev/null
+    cursor_bridge_connect_cpa || true
+}
+
 recreate_service() {
     cd "${SCRIPT_DIR}"
+    ensure_cpa_cursor_bridge_network || return 1
     local rc
     CPA_PORT="${CPA_PORT}" CPA_IMAGE="${DOCKER_IMAGE}" CPA_PULL_POLICY=never \
         $COMPOSE_CMD -f "${COMPOSE_FILE}" up -d --force-recreate
     rc=$?
-    maybe_start_cursor_bridge_sidecar || true
+    if [[ "${rc}" -eq 0 ]]; then
+        maybe_start_cursor_bridge_sidecar || true
+    fi
     return "${rc}"
 }
 
@@ -1907,6 +1930,7 @@ rollback_saved_image() {
         fi
         docker image tag "${rollback_id}" "${ROLLBACK_IMAGE}" >/dev/null
         recreate_service >/dev/null 2>&1 || true
+        ensure_cpa_running_after_update_failure || true
         return 1
     fi
 
@@ -1922,6 +1946,7 @@ rollback_saved_image() {
         docker image tag "${rollback_id}" "${ROLLBACK_IMAGE}" >/dev/null
         recreate_service >/dev/null 2>&1 || true
     fi
+    ensure_cpa_running_after_update_failure || true
     return 1
 }
 
@@ -1940,13 +1965,22 @@ transactional_update() {
     fi
 
     step "重建并检查服务"
-    if ! recreate_service 2>&1 | tail -1; then
+    local recreate_out recreate_rc=0
+    recreate_out="$(recreate_service 2>&1)" || recreate_rc=$?
+    if [[ "${recreate_rc}" -ne 0 ]]; then
         error "新容器启动失败"
+        if [[ -n "${recreate_out}" ]]; then
+            printf '%s\n' "${recreate_out}" | tail -n 30 | sed 's/^/       /'
+        fi
         if $rollback_available; then
             warn "正在自动回滚"
             rollback_saved_image || true
         fi
+        ensure_cpa_running_after_update_failure || true
         return 1
+    fi
+    if [[ -n "${recreate_out}" ]]; then
+        printf '%s\n' "${recreate_out}" | tail -n 1 | sed 's/^/       /'
     fi
 
     if wait_for_service_health; then
@@ -1963,6 +1997,7 @@ transactional_update() {
     else
         error "没有更新前镜像，无法自动回滚"
     fi
+    ensure_cpa_running_after_update_failure || true
     return 1
 }
 
@@ -2285,6 +2320,11 @@ start_service() {
             docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
         fi
     fi
+
+    ensure_cpa_cursor_bridge_network || {
+        error "无法创建 ${CURSOR_BRIDGE_NETWORK}"
+        return 1
+    }
 
     # 镜像已在停止旧容器前拉取，避免 Compose 重复访问仓库
     CPA_PORT="${CPA_PORT}" CPA_IMAGE="${DOCKER_IMAGE}" CPA_PULL_POLICY=never \
@@ -4126,6 +4166,7 @@ cmd_cursor_bridge_configure() {
     prompt_cursor_api_key force || return 1
     ensure_cursor_bridge_ready || return 1
     if docker inspect "${CURSOR_BRIDGE_CONTAINER_NAME}" >/dev/null 2>&1; then
+        ensure_cpa_cursor_bridge_network || return 1
         cursor_bridge_compose up -d --remove-orphans
         cursor_bridge_connect_cpa || true
         info "已更换 Cursor key 并重建桥容器"
@@ -4139,6 +4180,7 @@ cmd_cursor_bridge_start() {
     ensure_cursor_bridge_ready || return 1
     ensure_cursor_bridge_image || return 1
     cursor_bridge_compose config --quiet || { error "Cursor Bridge Compose 校验失败"; return 1; }
+    ensure_cpa_cursor_bridge_network || return 1
     cursor_bridge_compose up -d --remove-orphans
     docker network rm cursor-bridge-backend >/dev/null 2>&1 || true
     cursor_bridge_connect_cpa || true

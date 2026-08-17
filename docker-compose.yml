@@ -36,5 +36,9 @@ volumes:
     name: cli-proxy-manager-auth
 
 networks:
+  # Shared with docker-compose.cursor-bridge.yml. Must stay external so
+  # `compose up --force-recreate` / `down` cannot delete it while cursor-bridge
+  # is still attached (that left CPA Exited overnight).
   cpa-cursor-bridge:
     name: cpa-cursor-bridge
+    external: true

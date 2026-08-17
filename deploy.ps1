@@ -1656,6 +1656,26 @@ function Test-ServiceHealth($attempts = 30, $delaySeconds = 1) {
     return $false
 }
 
+function Ensure-CpaCursorBridgeNetwork {
+    $null = docker network inspect $script:CURSOR_BRIDGE_NETWORK 2>$null
+    if ($LASTEXITCODE -eq 0) { return }
+    docker network create --driver bridge $script:CURSOR_BRIDGE_NETWORK | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "无法创建网络 $($script:CURSOR_BRIDGE_NETWORK)" }
+}
+
+function Ensure-CpaRunningAfterUpdateFailure {
+    $running = @(docker ps --format '{{.Names}}' 2>$null)
+    if ($running -contains $script:CONTAINER_NAME) { return }
+    $all = @(docker ps -a --format '{{.Names}}' 2>$null)
+    if ($all -notcontains $script:CONTAINER_NAME) {
+        warn "更新失败后未找到 $($script:CONTAINER_NAME)，无法自动拉起"
+        return
+    }
+    warn "更新失败，正在拉起已有 $($script:CONTAINER_NAME)，避免服务停机"
+    docker start $script:CONTAINER_NAME | Out-Null
+    try { Connect-CursorBridgeCpa } catch { }
+}
+
 function Invoke-ServiceRecreate {
     Push-Location $script:SCRIPT_DIR
     $hasNativePreference = Test-Path variable:PSNativeCommandUseErrorActionPreference
@@ -1671,6 +1691,7 @@ function Invoke-ServiceRecreate {
         $env:CPA_PORT = $script:CPA_PORT
         $env:CPA_IMAGE = $script:DOCKER_IMAGE
         $env:CPA_PULL_POLICY = 'never'
+        Ensure-CpaCursorBridgeNetwork
         $output = Invoke-Compose -f $script:COMPOSE_FILE up -d --force-recreate 2>&1
         $composeExitCode = $LASTEXITCODE
         if ($output) { detail ([string]($output | Select-Object -Last 1)) }
@@ -1726,6 +1747,7 @@ function Invoke-SavedImageRollback {
         $null = Set-DockerImageTag $rollbackId $script:ROLLBACK_IMAGE
         $null = Invoke-ServiceRecreate
     }
+    Ensure-CpaRunningAfterUpdateFailure
     return $false
 }
 
@@ -1765,6 +1787,7 @@ function Invoke-TransactionalUpdate {
             warn '正在自动回滚'
             $null = Invoke-SavedImageRollback
         }
+        Ensure-CpaRunningAfterUpdateFailure
         return $false
     }
 
@@ -1781,6 +1804,7 @@ function Invoke-TransactionalUpdate {
     } else {
         error-msg '没有更新前镜像，无法自动回滚'
     }
+    Ensure-CpaRunningAfterUpdateFailure
     return $false
 }
 
@@ -2143,6 +2167,7 @@ function start-service {
         }
 
         # 镜像已在停止旧容器前拉取，避免 Compose 重复访问仓库
+        Ensure-CpaCursorBridgeNetwork
         $env:CPA_PORT = $script:CPA_PORT
         $env:CPA_IMAGE = $script:DOCKER_IMAGE
         $previousPullPolicy = $env:CPA_PULL_POLICY
@@ -3677,6 +3702,7 @@ function cmd-cursor-bridge-configure {
     Ensure-CursorBridgeReady
     $null = docker inspect $script:CURSOR_BRIDGE_CONTAINER_NAME 2>$null
     if ($LASTEXITCODE -eq 0) {
+        Ensure-CpaCursorBridgeNetwork
         Invoke-CursorBridgeCompose up -d --remove-orphans
         Connect-CursorBridgeCpa
         info '已更换 Cursor key 并重建桥容器'
@@ -3690,6 +3716,7 @@ function cmd-cursor-bridge-start {
     Ensure-CursorBridgeReady
     Ensure-CursorBridgeImage
     Invoke-CursorBridgeCompose config --quiet
+    Ensure-CpaCursorBridgeNetwork
     Invoke-CursorBridgeCompose up -d --remove-orphans
     $null = docker network rm cursor-bridge-backend 2>$null
     Connect-CursorBridgeCpa

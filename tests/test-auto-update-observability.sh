@@ -20,5 +20,6 @@ assert_contains '服务器时间:' 'auto-update log must show server time'
 assert_contains '北京时间:' 'auto-update log must show Beijing time'
 assert_contains '服务器时区:' 'status must show the server time zone'
 assert_contains '最近 cron 触发:' 'status must show the latest cron journal record'
+assert_contains 'ensure_cpa_running_after_update_failure' 'auto-update must start CPA again if recreate leaves it down'
 
 printf 'PASS: auto-update observability contract is present\n'
